@@ -37,5 +37,12 @@ class Settings:
     # KIE upload cache (helps speed by reusing already-uploaded tempfile URLs)
     KIE_UPLOAD_CACHE: int = _env_int("KIE_UPLOAD_CACHE", 1)
 
+    # Image proxy (prevents hotlink/CORS issues with third-party images)
+    IMAGE_PROXY_ENABLED: int = _env_int("IMAGE_PROXY_ENABLED", 1)
+    IMAGE_PROXY_HOSTS: str = _env(
+        "IMAGE_PROXY_HOSTS",
+        "files.gifts.ru,tempfile.redpandaai.co,tempfile.aiquickdraw.com,tempfile.aiquickdraw.com",
+    )
+
 
 settings = Settings()
