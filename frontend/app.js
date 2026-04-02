@@ -18,6 +18,8 @@ const state = {
   pollTimer: null,
   tshirtView: "front", // front | back
   sceneMode: "on_model", // on_model | product_only
+  externalImageProxyBase: "",
+  configLoaded: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -35,6 +37,21 @@ function el(tag, attrs = {}, children = []) {
   });
   for (const c of children) node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
   return node;
+}
+
+function imgSrc(url) {
+  const u = String(url || "");
+  if (!u) return "";
+  // Same-origin files are fine.
+  if (u.startsWith("/")) return u;
+  if (u.startsWith(window.location.origin)) return u;
+  // Prefer external proxy if configured (for hosts that block outbound requests).
+  if (state.externalImageProxyBase) {
+    const base = String(state.externalImageProxyBase).replace(/\/+$/, "");
+    return `${base}?url=${encodeURIComponent(u)}`;
+  }
+  // Proxy known third-party images through backend to avoid hotlink blocks.
+  return `/api/image?url=${encodeURIComponent(u)}`;
 }
 
 function render() {
@@ -259,7 +276,7 @@ function productCard(p) {
       render();
     },
   }, [
-    el("img", { src: img, alt: p.title || "product" }),
+    el("img", { src: imgSrc(img), alt: p.title || "product" }),
     el("div", { class: "p" }, [
       el("div", { class: "h" }, [p.title || "—"]),
       el("div", { class: "m" }, [`${p.category || ""} • ${p.price || ""} • арт. ${p.article || ""}`]),
@@ -328,7 +345,7 @@ function renderCustomize() {
     el("div", { class: "subtitle" }, ["Выбранный товар"]),
     el("div", { class: "hr" }),
     el("img", {
-      src: state.selectedImageUrl || (p.images && p.images[0]) || "",
+      src: imgSrc(state.selectedImageUrl || (p.images && p.images[0]) || ""),
       style: "width:100%;border-radius:14px;border:1px solid rgba(255,255,255,0.10);",
       alt: p.title || "product",
     }),
@@ -429,14 +446,49 @@ function torsoSvg(mode) {
 
 function productPhotosPicker(p) {
   const imgs = Array.isArray(p.images) ? p.images : [];
-  if (!imgs.length) {
-    return el("div", { class: "help" }, ["У товара нет photos/images в base.json"]);
-  }
   const grid = el("div", { class: "thumbs" }, []);
+
+  // Upload custom product photo (works even if external images are blocked).
+  const uploadWrap = el("div", {}, []);
+  const uploadInput = el("input", {
+    class: "input",
+    type: "file",
+    accept: "image/*",
+    onchange: async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch("/api/uploads", { method: "POST", body: form });
+        const text = await res.text();
+        if (!res.ok) throw new Error(`Upload failed: ${res.status} ${text}`);
+        const data = JSON.parse(text);
+        state.selectedImageUrl = data.url;
+        render();
+      } catch (err) {
+        state.lastError = String(err);
+        render();
+      }
+    },
+  });
+  uploadWrap.appendChild(uploadInput);
+  grid.appendChild(el("div", { class: "panel", style: "padding:10px;border-radius:12px;display:grid;gap:8px;" }, [
+    el("div", { class: "subtitle" }, ["Загрузить фото"]),
+    uploadWrap,
+  ]));
+
+  if (!imgs.length) {
+    return el("div", {}, [
+      grid,
+      el("div", { class: "help" }, ["Фото из каталога недоступны — загрузите своё фото товара."]),
+    ]);
+  }
+
   for (const url of imgs.slice(0, 24)) {
     grid.appendChild(el("img", {
       class: `thumb ${state.selectedImageUrl === url ? "selected" : ""}`,
-      src: url,
+      src: imgSrc(url),
       alt: "photo",
       onclick: () => {
         state.selectedImageUrl = url;
@@ -453,12 +505,27 @@ function applicationSelect() {
       state.application = e.target.value;
     },
   }, [
+    opt("print", "Принт (print)"),
     opt("embroidery", "Вышивка (embroidery)"),
     opt("screen_print", "Шелкография (screen_print)"),
     opt("dtf", "DTF (dtf)"),
+    opt("dtg", "DTG (dtg)"),
+    opt("heat_transfer", "Термотрансфер (heat_transfer)"),
     opt("patch", "Нашивка (patch)"),
     opt("engraving", "Гравировка (engraving)"),
     opt("sublimation", "Сублимация (sublimation)"),
+    opt("flex", "Флекс (flex)"),
+    opt("flock", "Флок (flock)"),
+    opt("puff_print", "Пухлый принт (puff_print)"),
+    opt("high_density", "Высокая плотность (high_density)"),
+    opt("reflective", "Светоотражающий (reflective)"),
+    opt("foil", "Фольга (foil)"),
+    opt("glitter", "Глиттер (glitter)"),
+    opt("neon", "Неон (neon)"),
+    opt("glow", "Свечение (glow)"),
+    opt("rubber_print", "Резиновый принт (rubber_print)"),
+    opt("water_based", "Водная краска (water_based)"),
+    opt("plastisol", "Пластизоль (plastisol)"),
   ]);
   sel.value = state.application;
   return sel;
@@ -730,7 +797,7 @@ function renderResult() {
     if (state.resultUrl) {
       return el("div", {}, [
         el("img", {
-          src: state.resultUrl,
+          src: imgSrc(state.resultUrl),
           alt: "result",
           style: "width:100%;border-radius:14px;border:1px solid rgba(255,255,255,0.10);",
         }),
@@ -818,4 +885,25 @@ function escapeAttr(s) {
   return String(s).replaceAll('"', "&quot;");
 }
 
-render();
+async function loadPublicConfig() {
+  if (state.configLoaded) return;
+  try {
+    const res = await fetch("/api/public-config");
+    const text = await res.text();
+    if (res.ok) {
+      const cfg = JSON.parse(text);
+      state.externalImageProxyBase = String(cfg?.externalImageProxyBase || "").trim();
+    }
+  } catch {
+    // ignore
+  } finally {
+    state.configLoaded = true;
+  }
+}
+
+async function init() {
+  await loadPublicConfig();
+  render();
+}
+
+init();
