@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import sys
+from urllib.parse import urlparse
+
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .kie import extract_uploaded_file_url, get_client, parse_result_json
@@ -270,6 +272,42 @@ def _product_matches_id(raw: Dict[str, Any], product_id: str) -> bool:
 @app.get("/api/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+def _proxy_allowed_hosts() -> set[str]:
+    return {h.strip().lower() for h in (settings.IMAGE_PROXY_HOSTS or "").split(",") if h.strip()}
+
+
+@app.get("/api/image")
+async def image_proxy(url: str) -> Response:
+    """
+    Proxies images from allowed hosts to avoid hotlink restrictions.
+    """
+    if not settings.IMAGE_PROXY_ENABLED:
+        raise HTTPException(status_code=404, detail="image proxy disabled")
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid url")
+
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="invalid url")
+
+    host = parsed.hostname.lower()
+    if host not in _proxy_allowed_hosts():
+        raise HTTPException(status_code=400, detail=f"host not allowed: {host}")
+
+    headers = {"User-Agent": "Mozilla/5.0 (image-proxy)"}
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        upstream = await client.get(url, headers=headers)
+
+    if upstream.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"upstream {upstream.status_code}")
+
+    content_type = upstream.headers.get("content-type", "application/octet-stream")
+    cache = "public, max-age=3600"
+    return Response(content=upstream.content, media_type=content_type, headers={"Cache-Control": cache})
 
 
 if settings.DEBUG_ROUTES:
