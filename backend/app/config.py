@@ -43,6 +43,9 @@ class Settings:
         "IMAGE_PROXY_HOSTS",
         "files.gifts.ru,tempfile.redpandaai.co,tempfile.aiquickdraw.com,tempfile.aiquickdraw.com",
     )
+    # Optional external proxy (e.g., Cloudflare Worker) for environments that block outbound requests.
+    # Example: https://your-worker.your-subdomain.workers.dev
+    EXTERNAL_IMAGE_PROXY_BASE: str = _env("EXTERNAL_IMAGE_PROXY_BASE", "")
 
 
 settings = Settings()

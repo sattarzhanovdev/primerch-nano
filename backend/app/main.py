@@ -274,6 +274,13 @@ def _product_matches_id(raw: Dict[str, Any], product_id: str) -> bool:
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
+@app.get("/api/public-config")
+async def public_config() -> Dict[str, Any]:
+    return {
+        "externalImageProxyBase": (settings.EXTERNAL_IMAGE_PROXY_BASE or "").strip(),
+        "imageProxyEnabled": bool(settings.IMAGE_PROXY_ENABLED),
+    }
+
 
 def _proxy_allowed_hosts() -> set[str]:
     return {h.strip().lower() for h in (settings.IMAGE_PROXY_HOSTS or "").split(",") if h.strip()}
