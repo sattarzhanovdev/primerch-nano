@@ -1,0 +1,35 @@
+#!/Users/sattarzanov/Desktop/primerch/backend/venv/bin/python3.12
+"""Reloads the given site
+
+Usage:
+  pa_reload_webapp.py <domain>
+
+Options:
+  <domain>              Domain name, eg www.mydomain.com
+"""
+
+import os
+from docopt import docopt
+
+from pythonanywhere import __version__
+from pythonanywhere_core.exceptions import MissingCNAMEException
+
+os.environ["PYTHONANYWHERE_CLIENT"] = f"helper-scripts/{__version__}"
+from pythonanywhere_core.webapp import Webapp
+from snakesay import snakesay
+
+
+def main(domain_name):
+    webapp = Webapp(domain_name)
+    try:
+        webapp.reload()
+    except MissingCNAMEException as e:
+        print(snakesay(str(e)))
+    print(snakesay(
+        f"{domain_name} has been reloaded"
+    ))
+
+
+if __name__ == '__main__':
+    arguments = docopt(__doc__)
+    main(arguments['<domain>'])

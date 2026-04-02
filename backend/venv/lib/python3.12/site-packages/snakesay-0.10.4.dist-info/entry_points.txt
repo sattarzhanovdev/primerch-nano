@@ -1,0 +1,3 @@
+[console_scripts]
+snakesay = snakesay.snakesay:main
+
