@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 import sys
 from urllib.parse import urlparse
 
+import httpx
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
