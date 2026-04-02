@@ -34,12 +34,27 @@ PLACEMENT_HINTS: dict[str, str] = {
 }
 
 APPLICATION_HINTS: dict[str, str] = {
+    "print": "ultra-realistic print",
     "embroidery": "ultra-realistic premium embroidery",
     "screen_print": "ultra-realistic screen print",
     "dtf": "ultra-realistic DTF transfer print",
+    "dtg": "ultra-realistic DTG direct-to-garment print",
+    "heat_transfer": "ultra-realistic heat transfer (thermotransfer) print",
     "patch": "ultra-realistic sewn fabric patch",
     "engraving": "ultra-realistic laser engraving",
     "sublimation": "ultra-realistic sublimation print",
+    "flex": "ultra-realistic flex vinyl heat transfer",
+    "flock": "ultra-realistic flock vinyl (velvety) heat transfer",
+    "puff_print": "ultra-realistic puff print (raised ink)",
+    "high_density": "ultra-realistic high-density print (thick raised ink)",
+    "reflective": "ultra-realistic reflective print (retroreflective, subtle shine)",
+    "foil": "ultra-realistic foil print (metallic foil transfer)",
+    "glitter": "ultra-realistic glitter print (sparkly particles)",
+    "neon": "ultra-realistic neon ink print (very bright colors)",
+    "glow": "ultra-realistic glow-in-the-dark print (photoluminescent ink)",
+    "rubber_print": "ultra-realistic rubber print (soft-touch raised ink)",
+    "water_based": "ultra-realistic water-based ink print (matte, absorbed)",
+    "plastisol": "ultra-realistic plastisol ink print (slight thickness, opaque)",
 }
 
 
@@ -117,7 +132,25 @@ EMBROIDERY REALISM:
 - Avoid flat printed appearance, sticker look, plastic gloss, or floating appearance.
 """.strip()
 
-    if application in {"screen_print", "dtf", "sublimation"}:
+    if application in {
+        "screen_print",
+        "dtf",
+        "dtg",
+        "heat_transfer",
+        "sublimation",
+        "flex",
+        "flock",
+        "puff_print",
+        "high_density",
+        "reflective",
+        "foil",
+        "glitter",
+        "neon",
+        "glow",
+        "rubber_print",
+        "water_based",
+        "plastisol",
+    }:
         if kind == "text":
             return f"""
 PRINT TEXT REALISM:
@@ -420,5 +453,3 @@ Return a photorealistic result of the same product from the first image,
 with only one intended branding change:
 the provided design applied as {application} {placement}.
 """.strip()
-
-
