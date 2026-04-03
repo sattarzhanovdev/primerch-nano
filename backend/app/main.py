@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from .kie import extract_uploaded_file_url, get_client, parse_result_json
+from .kie import extract_result_urls_any, extract_uploaded_file_url, get_client, parse_result_json
 from .prompts import PromptInputs, build_nanobanana_prompt
 from .config import settings
 from .kie_cache import KieUploadCache
@@ -26,7 +26,7 @@ from .text_image import render_text_png
 from .url_utils import is_public_http_url
 
 
-app = FastAPI(title="Primerch KIE Nano-Banana-2 API", version="0.1.0")
+app = FastAPI(title="Primerch KIE Image API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +46,7 @@ class GenerateJob:
     created_at: float
     updated_at: float
     state: str  # queued|submitting|submitted|failed
+    provider: str = "kie_gpt4o_image"  # kie_jobs | kie_gpt4o_image
     error: str = ""
     kie_task_id: str = ""
     request_payload: Optional[Dict[str, Any]] = None
@@ -56,6 +57,37 @@ _jobs: Dict[str, GenerateJob] = {}
 
 def _base_json_path() -> Path:
     return repo_root() / "base.json"
+
+def _coerce_provider(payload: Dict[str, Any]) -> str:
+    """
+    Decide which KIE API flavor to use.
+    - default: jobs/createTask (supports nano-banana models)
+    - gpt4o-image: /api/v1/gpt4o-image/generate
+    """
+    raw = (payload.get("provider") or payload.get("kieProvider") or payload.get("kie_provider") or "").strip().lower()
+    model = (payload.get("model") or payload.get("kieModel") or payload.get("kie_model") or "").strip().lower()
+
+    if raw in {"gpt4o-image", "gpt4o_image", "kie_gpt4o_image"}:
+        return "kie_gpt4o_image"
+    if model in {"gpt4o-image", "gpt4o_image", "gpt-4o", "gpt4o", "4o-image-api", "4o_image_api"}:
+        return "kie_gpt4o_image"
+    # Default to gpt4o-image as requested.
+    return "kie_gpt4o_image"
+
+def _map_to_gpt4o_size(aspect: str) -> str:
+    """
+    gpt4o-image endpoint only supports: 1:1, 3:2, 2:3.
+    Map our UI aspect ratios to the closest supported value.
+    """
+    a = (aspect or "").strip().lower()
+    if a in {"1:1"}:
+        return "1:1"
+    if a in {"3:2", "4:3", "16:9", "2:1", "5:4"}:
+        return "3:2"
+    if a in {"2:3", "3:4", "9:16", "4:5"}:
+        return "2:3"
+    # Default landscape
+    return "3:2"
 
 
 def _load_products() -> List[Dict[str, Any]]:
@@ -468,10 +500,21 @@ async def generate(
     placement = (payload.get("placement") or "").strip()
     application = (payload.get("application") or "embroidery").strip()
     image_size = (payload.get("image_size") or payload.get("imageSize") or "4:3").strip()
+    resolution = (payload.get("resolution") or "720p").strip()
     num_images = int(payload.get("numImages") or 1)
     scene_mode = (payload.get("scene_mode") or payload.get("sceneMode") or "on_model").strip()
     model_gender = (payload.get("model_gender") or payload.get("modelGender") or "neutral").strip()
     speed_mode = (payload.get("speed_mode") or payload.get("speedMode") or "quality").strip()
+    kie_provider = _coerce_provider(payload)
+    # Default model is irrelevant for gpt4o-image provider, but keep a sane default for jobs/createTask.
+    kie_model = (payload.get("model") or payload.get("kieModel") or payload.get("kie_model") or "nano-banana-2").strip()
+
+    # gpt4o-image has a restricted set of sizes; align prompt + request size.
+    prompt_aspect_ratio = image_size
+    gpt4o_size = ""
+    if kie_provider == "kie_gpt4o_image":
+        gpt4o_size = (payload.get("size") or "").strip() or _map_to_gpt4o_size(image_size)
+        prompt_aspect_ratio = gpt4o_size
 
     if not product_id and not product_article:
         raise HTTPException(status_code=400, detail="productId or productArticle is required")
@@ -504,7 +547,7 @@ async def generate(
             product_title=_product_prompt_title(product),
             application=application,
             placement=placement,
-            aspect_ratio=image_size,
+            aspect_ratio=prompt_aspect_ratio,
             scene_mode=scene_mode,
             model_gender=model_gender,
             source_kind=source_kind,
@@ -565,6 +608,10 @@ async def generate(
 
     def _extract_task_id(create_task_resp: Any) -> str:
         if isinstance(create_task_resp, dict):
+            # Some endpoints may return taskId at the top level.
+            for k in ("taskId", "task_id", "id"):
+                if create_task_resp.get(k):
+                    return str(create_task_resp.get(k))
             data = create_task_resp.get("data")
             if isinstance(data, dict):
                 tid = data.get("taskId") or data.get("task_id") or data.get("id")
@@ -578,31 +625,44 @@ async def generate(
             return
         job.state = "submitting"
         job.updated_at = time.time()
+        job.provider = str(job_payload.get("provider") or job.provider or "kie_gpt4o_image")
         try:
             product_kie_url = await to_kie_file_url(job_payload["productImageUrl"], server_base=server_base)
             logo_kie_url = await to_kie_file_url(job_payload["logoUrl"], server_base=server_base)
 
-            kie_payload: Dict[str, Any] = {
-                "model": "nano-banana-2",
-                **({"callBackUrl": job_payload.get("callBackUrl")} if job_payload.get("callBackUrl") else {}),
-                "input": {
+            if job.provider == "kie_gpt4o_image":
+                kie_payload = {
+                    "filesUrl": [product_kie_url, logo_kie_url],
                     "prompt": job_payload["prompt"],
-                    # KIE payload formats differ by model/version; send both keys for maximum compatibility.
-                    "image_input": [product_kie_url, logo_kie_url],
-                    "image_urls": [product_kie_url, logo_kie_url],
-                    "aspect_ratio": job_payload.get("image_size") or "4:3",
-                    "image_size": job_payload.get("image_size") or "4:3",
-                    "resolution": job_payload.get("resolution") or "1K",
-                    "output_format": job_payload.get("output_format") or "png",
-                },
-            }
-
-            res = await client.create_task(kie_payload)
+                    "size": job_payload.get("size") or _map_to_gpt4o_size(job_payload.get("image_size") or ""),
+                    **({"callBackUrl": job_payload.get("callBackUrl")} if job_payload.get("callBackUrl") else {}),
+                    "isEnhance": False,
+                    "uploadCn": False,
+                    "enableFallback": False,
+                    "fallbackModel": "FLUX_MAX",
+                }
+                res = await client.gpt4o_image_generate(kie_payload)
+            else:
+                kie_payload = {
+                    "model": (job_payload.get("model") or "nano-banana-2"),
+                    **({"callBackUrl": job_payload.get("callBackUrl")} if job_payload.get("callBackUrl") else {}),
+                    "input": {
+                        "prompt": job_payload["prompt"],
+                        # KIE payload formats differ by model/version; send both keys for maximum compatibility.
+                        "image_input": [product_kie_url, logo_kie_url],
+                        "image_urls": [product_kie_url, logo_kie_url],
+                        "aspect_ratio": job_payload.get("image_size") or "4:3",
+                        "image_size": job_payload.get("image_size") or "4:3",
+                        "resolution": job_payload.get("resolution") or "720p",
+                        "output_format": job_payload.get("output_format") or "png",
+                    },
+                }
+                res = await client.create_task(kie_payload)
             tid = _extract_task_id(res)
             job.kie_task_id = tid
             job.state = "submitted" if tid else "failed"
             job.error = "" if tid else f"Missing taskId in response: {res}"
-            job.request_payload = {"jobs/createTask": kie_payload, "createTaskResponse": res}
+            job.request_payload = {"request": kie_payload, "response": res}
             job.updated_at = time.time()
         except Exception as e:
             job.state = "failed"
@@ -613,7 +673,7 @@ async def generate(
     if settings.GENERATE_ASYNC:
         job_id = uuid4().hex
         now = time.time()
-        job = GenerateJob(job_id=job_id, created_at=now, updated_at=now, state="queued")
+        job = GenerateJob(job_id=job_id, created_at=now, updated_at=now, state="queued", provider=kie_provider)
         _jobs[job_id] = job
 
         submit_payload = {
@@ -622,31 +682,55 @@ async def generate(
             "logoUrl": logo_url,
             "callBackUrl": call_back_url,
             "image_size": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
-            "resolution": (payload.get("resolution") or "1K"),
+            "resolution": resolution or "720p",
             "output_format": (payload.get("output_format") or payload.get("outputFormat") or "png"),
+            "provider": kie_provider,
+            "model": kie_model,
+            "size": gpt4o_size,
         }
         background_tasks.add_task(_submit_job, job_id, _server_base_url(), submit_payload)
-        return {"provider": "kie", "jobId": job_id, "state": "queued"}
+        return {"provider": "kie", "kieProvider": kie_provider, "jobId": job_id, "state": "queued"}
 
     # Fallback sync mode (not recommended for strict latency).
     product_kie_url = await to_kie_file_url(product_image_url, server_base=_server_base_url())
     logo_kie_url = await to_kie_file_url(logo_url, server_base=_server_base_url())
-    kie_payload: Dict[str, Any] = {
-        "model": "nano-banana-2",
-        **({"callBackUrl": call_back_url} if call_back_url else {}),
-        "input": {
+
+    if kie_provider == "kie_gpt4o_image":
+        kie_payload = {
+            "filesUrl": [product_kie_url, logo_kie_url],
             "prompt": prompt,
-            # KIE payload formats differ by model/version; send both keys for maximum compatibility.
-            "image_input": [product_kie_url, logo_kie_url],
-            "image_urls": [product_kie_url, logo_kie_url],
-            "aspect_ratio": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
-            "image_size": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
-            "resolution": (payload.get("resolution") or "1K"),
-            "output_format": (payload.get("output_format") or payload.get("outputFormat") or "png"),
-        },
+            "size": gpt4o_size or _map_to_gpt4o_size(image_size),
+            **({"callBackUrl": call_back_url} if call_back_url else {}),
+            "isEnhance": False,
+            "uploadCn": False,
+            "enableFallback": False,
+            "fallbackModel": "FLUX_MAX",
+        }
+        res = await client.gpt4o_image_generate(kie_payload)
+    else:
+        kie_payload = {
+            "model": kie_model or "nano-banana-2",
+            **({"callBackUrl": call_back_url} if call_back_url else {}),
+            "input": {
+                "prompt": prompt,
+                # KIE payload formats differ by model/version; send both keys for maximum compatibility.
+                "image_input": [product_kie_url, logo_kie_url],
+                "image_urls": [product_kie_url, logo_kie_url],
+                "aspect_ratio": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
+                "image_size": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
+                "resolution": resolution or "720p",
+                "output_format": (payload.get("output_format") or payload.get("outputFormat") or "png"),
+            },
+        }
+        res = await client.create_task(kie_payload)
+
+    return {
+        "provider": "kie",
+        "kieProvider": kie_provider,
+        "request": kie_payload,
+        "response": res,
+        "kieTaskId": _extract_task_id(res),
     }
-    res = await client.create_task(kie_payload)
-    return {"provider": "kie", "request": kie_payload, "response": res, "kieTaskId": _extract_task_id(res)}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -659,6 +743,7 @@ async def job_status(job_id: str) -> Dict[str, Any]:
         "jobId": job.job_id,
         "state": job.state,
         "error": job.error,
+        "kieProvider": job.provider,
         "kieTaskId": job.kie_task_id or None,
         "createdAt": job.created_at,
         "updatedAt": job.updated_at,
@@ -666,16 +751,19 @@ async def job_status(job_id: str) -> Dict[str, Any]:
 
     if job.kie_task_id:
         # Reuse existing task-details logic.
-        details = await task_details(job.kie_task_id)
+        details = await task_details(job.kie_task_id, provider=job.provider)
         out["task"] = details
     return out
 
 
 @app.get("/api/tasks/{task_id}")
-async def task_details(task_id: str) -> Dict[str, Any]:
+async def task_details(task_id: str, provider: str = "") -> Dict[str, Any]:
     client = get_client()
     try:
-        res = await client.record_info(task_id)
+        if (provider or "").strip().lower() in {"kie_gpt4o_image", "gpt4o-image", "gpt4o_image"}:
+            res = await client.gpt4o_image_record_info(task_id)
+        else:
+            res = await client.record_info(task_id)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
@@ -684,7 +772,10 @@ async def task_details(task_id: str) -> Dict[str, Any]:
     callback = _callback_store.get(task_id)
     data = (res.get("data") or {}) if isinstance(res, dict) else {}
     result = parse_result_json(data.get("resultJson"))
-    return {"provider": "kie", "recordInfo": res, "result": result, "callback": callback}
+    if result is None:
+        urls = extract_result_urls_any(res)
+        result = {"resultUrls": urls} if urls else None
+    return {"provider": "kie", "kieProvider": provider or "kie_jobs", "recordInfo": res, "result": result, "callback": callback}
 
 
 @app.post("/api/callback")

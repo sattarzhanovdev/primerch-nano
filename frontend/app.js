@@ -15,6 +15,7 @@ const state = {
   taskFailMsg: "",
   resultUrl: "",
   jobId: "",
+  kieProvider: "kie_gpt4o_image",
   lastTaskJson: null,
   pollTimer: null,
   tshirtView: "front", // front | back
@@ -769,6 +770,7 @@ async function onGenerate() {
   state.taskFailMsg = "";
   state.resultUrl = "";
   state.jobId = "";
+  state.kieProvider = "kie_gpt4o_image";
   state.lastTaskJson = null;
   state.step = "result";
   render();
@@ -783,8 +785,9 @@ async function onGenerate() {
     speed_mode: state.speedMode,
     model_gender: state.gender === "male" ? "male" : state.gender === "female" ? "female" : "neutral",
     numImages: 1,
-    image_size: "4:3",
-    resolution: state.resolution || "1K",
+    // Backend maps to provider-supported sizes (e.g. gpt4o-image supports only 1:1, 3:2, 2:3).
+    image_size: "3:2",
+    resolution: state.resolution || "720p",
   };
   if (state.mode === "logo") body.logoUrl = state.logoUrl;
   if (state.mode === "text") body.text = state.text;
@@ -806,6 +809,7 @@ async function onGenerate() {
     state.lastTaskJson = data;
 
     state.jobId = data?.jobId || "";
+    state.kieProvider = String(data?.kieProvider || data?.kie_provider || data?.kieProvider || state.kieProvider || "kie_gpt4o_image");
     const taskId = data?.kieTaskId || data?.response?.data?.taskId || data?.response?.data?.task_id || data?.response?.data?.id;
     state.taskId = taskId || "";
 
@@ -893,7 +897,9 @@ function stopPolling() {
 
 async function pollOnce(taskId) {
   try {
-    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+    const provider = (state.kieProvider || "").trim();
+    const qs = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}${qs}`);
     const text = await res.text();
     if (!res.ok) {
       state.lastError = `GET /api/tasks/{taskId} -> ${res.status} ${text}`;
@@ -935,6 +941,7 @@ async function pollJobOnce(jobId) {
     const data = JSON.parse(text);
     state.lastTaskJson = data;
     state.taskId = data?.kieTaskId || state.taskId;
+    state.kieProvider = String(data?.kieProvider || state.kieProvider || "kie_gpt4o_image");
     state.taskState = data?.state || "в процессе";
     if (state.taskId && data?.task) {
       const record = data.task?.recordInfo?.data || {};
