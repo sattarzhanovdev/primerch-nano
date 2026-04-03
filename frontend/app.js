@@ -20,6 +20,7 @@ const state = {
   tshirtView: "front", // front | back
   sceneMode: "on_model", // on_model | product_only
   externalImageProxyBase: "",
+  imageProxyEnabled: true,
   configLoaded: false,
 };
 
@@ -54,7 +55,9 @@ function imgSrc(url) {
     const base = String(state.externalImageProxyBase).replace(/\/+$/, "");
     return `${base}?url=${encodeURIComponent(u)}`;
   }
-  // Proxy known third-party images through backend to avoid hotlink blocks.
+  // If backend proxy is disabled (e.g. PythonAnywhere outbound restrictions),
+  // fall back to direct URLs so images can still render in the browser.
+  if (!state.imageProxyEnabled) return u;
   return `/api/image?url=${encodeURIComponent(u)}`;
 }
 
@@ -939,6 +942,7 @@ async function loadPublicConfig() {
     if (res.ok) {
       const cfg = JSON.parse(text);
       state.externalImageProxyBase = String(cfg?.externalImageProxyBase || "").trim();
+      state.imageProxyEnabled = Boolean(cfg?.imageProxyEnabled);
     }
   } catch {
     // ignore
