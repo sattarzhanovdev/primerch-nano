@@ -285,7 +285,7 @@ function productCard(p) {
       render();
     },
   }, [
-    el("img", { src: imgSrc(img), alt: p.title || "product" }),
+    el("img", { src: imgSrc(img), alt: p.title || "product", referrerpolicy: "no-referrer", loading: "lazy" }),
     el("div", { class: "p" }, [
       el("div", { class: "h" }, [p.title || "—"]),
       el("div", { class: "m" }, [`${p.category || ""} • ${p.price || ""} • арт. ${p.article || ""}`]),
@@ -357,6 +357,8 @@ function renderCustomize() {
       src: imgSrc(state.selectedImageUrl || (p.images && p.images[0]) || ""),
       style: "width:100%;border-radius:14px;border:1px solid rgba(255,255,255,0.10);",
       alt: p.title || "product",
+      referrerpolicy: "no-referrer",
+      loading: "lazy",
     }),
     el("div", { class: "hr" }),
     el("div", { class: "help" }, [
@@ -499,6 +501,8 @@ function productPhotosPicker(p) {
       class: `thumb ${state.selectedImageUrl === url ? "selected" : ""}`,
       src: imgSrc(url),
       alt: "photo",
+      referrerpolicy: "no-referrer",
+      loading: "lazy",
       onclick: () => {
         state.selectedImageUrl = url;
         render();
@@ -811,6 +815,8 @@ function renderResult() {
           src: imgSrc(state.resultUrl),
           alt: "result",
           style: "width:100%;border-radius:14px;border:1px solid rgba(255,255,255,0.10);",
+          referrerpolicy: "no-referrer",
+          loading: "lazy",
         }),
       ]);
     }
