@@ -14,6 +14,7 @@ const state = {
   taskState: "",
   taskFailMsg: "",
   resultUrl: "",
+  jobId: "",
   lastTaskJson: null,
   pollTimer: null,
   tshirtView: "front", // front | back
@@ -30,7 +31,10 @@ const SVG_TAGS = new Set(["svg", "path", "rect", "g", "circle", "ellipse", "line
 function el(tag, attrs = {}, children = []) {
   const node = SVG_TAGS.has(tag) ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
   Object.entries(attrs).forEach(([k, v]) => {
-    if (k === "class") node.className = v;
+    if (k === "class") {
+      if (SVG_TAGS.has(tag)) node.setAttribute("class", v);
+      else node.className = v;
+    }
     else if (k === "html") node.innerHTML = v;
     else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2), v);
     else node.setAttribute(k, v);
@@ -119,6 +123,7 @@ function renderTopbar() {
             taskState: "",
             taskFailMsg: "",
             resultUrl: "",
+            jobId: "",
             lastTaskJson: null,
             sceneMode: "on_model",
           });
@@ -270,6 +275,7 @@ function productCard(p) {
       state.taskState = "";
       state.taskFailMsg = "";
       state.resultUrl = "";
+      state.jobId = "";
       state.lastTaskJson = null;
       state.lastError = "";
       state.sceneMode = "on_model";
@@ -737,6 +743,7 @@ async function onGenerate() {
   state.taskState = "";
   state.taskFailMsg = "";
   state.resultUrl = "";
+  state.jobId = "";
   state.lastTaskJson = null;
   state.step = "result";
   render();
@@ -771,17 +778,14 @@ async function onGenerate() {
     const data = JSON.parse(text);
     state.lastTaskJson = data;
 
-    const taskId =
-      data?.response?.data?.taskId ||
-      data?.response?.data?.task_id ||
-      data?.response?.data?.id;
+    state.jobId = data?.jobId || "";
+    const taskId = data?.kieTaskId || data?.response?.data?.taskId || data?.response?.data?.task_id || data?.response?.data?.id;
     state.taskId = taskId || "";
 
     render();
 
-    if (state.taskId) {
-      startPolling(state.taskId);
-    }
+    if (state.jobId) startJobPolling(state.jobId);
+    else if (state.taskId) startPolling(state.taskId);
   } catch (err) {
     state.lastTaskJson = { error: String(err) };
     state.lastError = String(err);
@@ -790,7 +794,11 @@ async function onGenerate() {
 }
 
 function renderResult() {
-  const task = state.taskId ? el("span", { class: "badge" }, [`Номер: ${state.taskId.slice(0, 8)}`]) : el("span", { class: "badge" }, ["Номер: —"]);
+  const task = state.taskId
+    ? el("span", { class: "badge" }, [`Номер: ${state.taskId.slice(0, 8)}`])
+    : state.jobId
+      ? el("span", { class: "badge" }, [`Заявка: ${state.jobId.slice(0, 8)}`])
+      : el("span", { class: "badge" }, ["Номер: —"]);
   const statusBadge = state.taskState ? el("span", { class: "badge" }, [state.taskState]) : el("span", { class: "badge" }, ["в процессе"]);
 
   const resultNode = (() => {
@@ -819,8 +827,8 @@ function renderResult() {
       el("button", {
         class: "btn small",
         onclick: async () => {
-          if (!state.taskId) return;
-          await pollOnce(state.taskId);
+          if (state.jobId) return await pollJobOnce(state.jobId);
+          if (state.taskId) return await pollOnce(state.taskId);
         },
       }, ["Обновить"]),
       el("button", { class: "btn small danger", onclick: () => stopPolling() }, ["Стоп polling"]),
@@ -866,13 +874,51 @@ async function pollOnce(taskId) {
     const data = JSON.parse(text);
     state.lastTaskJson = data;
     const record = data?.recordInfo?.data || {};
-    state.taskState = record?.state || record?.status || "";
-    state.taskFailMsg = record?.failMsg || record?.failMessage || record?.errorMessage || "";
+    const successFlag = record?.successFlag;
+    if (successFlag === 1) state.taskState = "success";
+    else if (successFlag === 2 || successFlag === 3) state.taskState = "failed";
+    else state.taskState = record?.state || record?.status || "generating";
+    state.taskFailMsg = record?.errorMessage || record?.failMsg || record?.failMessage || "";
     const urls = data?.result?.resultUrls || data?.result?.result_urls || [];
     state.resultUrl = Array.isArray(urls) && urls.length ? urls[0] : "";
     render();
   } catch (err) {
     state.lastTaskJson = { error: String(err) };
+    state.lastError = String(err);
+    render();
+  }
+}
+
+function startJobPolling(jobId) {
+  pollJobOnce(jobId);
+  state.pollTimer = setInterval(() => pollJobOnce(jobId), 3000);
+}
+
+async function pollJobOnce(jobId) {
+  try {
+    const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+    const text = await res.text();
+    if (!res.ok) {
+      state.lastError = `GET /api/jobs/{jobId} -> ${res.status} ${text}`;
+      render();
+      return;
+    }
+    const data = JSON.parse(text);
+    state.lastTaskJson = data;
+    state.taskId = data?.kieTaskId || state.taskId;
+    state.taskState = data?.state || "в процессе";
+    if (state.taskId && data?.task) {
+      const record = data.task?.recordInfo?.data || {};
+      const successFlag = record?.successFlag;
+      if (successFlag === 1) state.taskState = "success";
+      else if (successFlag === 2 || successFlag === 3) state.taskState = "failed";
+      else state.taskState = record?.state || state.taskState;
+      const urls = data.task?.result?.resultUrls || [];
+      state.resultUrl = Array.isArray(urls) && urls.length ? urls[0] : "";
+      state.taskFailMsg = record?.errorMessage || record?.failMsg || "";
+    }
+    render();
+  } catch (err) {
     state.lastError = String(err);
     render();
   }

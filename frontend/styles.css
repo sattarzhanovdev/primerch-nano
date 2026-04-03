@@ -343,8 +343,8 @@ input[type="file"].input {
 }
 
 .zones .zone {
-  fill: rgba(255,255,255,0.04);
-  stroke: var(--dim);
+  fill: rgba(255,255,255,0.07);
+  stroke: rgba(255,255,255,0.18);
   stroke-width: 1.5;
   cursor: pointer;
   transition: fill 120ms, stroke 120ms;
@@ -356,9 +356,10 @@ input[type="file"].input {
 }
 
 .zones .zone.selected {
-  fill: rgba(245,196,0,0.14);
-  stroke: var(--accent);
-  stroke-width: 2;
+  fill: rgba(255,255,255,0.55);
+  stroke: rgba(255,255,255,0.90);
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0 10px rgba(255,255,255,0.22));
 }
 
 /* ─── Pre / debug ─────────────────────────────────────── */
