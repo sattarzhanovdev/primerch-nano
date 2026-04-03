@@ -334,7 +334,9 @@ async def image_proxy(url: str) -> Response:
     stream_ctx = client.stream("GET", url, headers=headers)
     try:
         upstream = await stream_ctx.__aenter__()
-    except httpx.HTTPError as e:
+    except Exception as e:
+        # In restricted environments (e.g. PythonAnywhere free) outbound TCP may be blocked.
+        # Be defensive here: return a regular 502 instead of letting the exception bubble up.
         await client.aclose()
         raise HTTPException(status_code=502, detail=f"upstream connect failed: {e}") from e
 
