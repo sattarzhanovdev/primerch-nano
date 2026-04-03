@@ -22,7 +22,7 @@ const state = {
   speedMode: "fast", // fast | quality
   externalImageProxyBase: "",
   imageProxyEnabled: true,
-  resolution: "720p",
+  resolution: "1K",
   configLoaded: false,
 };
 
@@ -784,7 +784,7 @@ async function onGenerate() {
     model_gender: state.gender === "male" ? "male" : state.gender === "female" ? "female" : "neutral",
     numImages: 1,
     image_size: "4:3",
-    resolution: state.resolution || "720p",
+    resolution: state.resolution || "1K",
   };
   if (state.mode === "logo") body.logoUrl = state.logoUrl;
   if (state.mode === "text") body.text = state.text;
