@@ -292,6 +292,12 @@ def _product_matches_id(raw: Dict[str, Any], product_id: str) -> bool:
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
+@app.head("/")
+async def head_root() -> Response:
+    # Render (and other platforms) may probe the service with HEAD /
+    # to detect readiness/port binding.
+    return Response(status_code=200)
+
 @app.get("/api/public-config")
 async def public_config() -> Dict[str, Any]:
     return {
@@ -325,9 +331,13 @@ async def image_proxy(url: str) -> Response:
     if host not in _proxy_allowed_hosts():
         raise HTTPException(status_code=400, detail=f"host not allowed: {host}")
 
+    upstream_site = f"{parsed.scheme}://{parsed.netloc}/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Primerch image proxy)",
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        # Some CDNs block hotlinking unless a same-site Referer/Origin is present.
+        "Referer": upstream_site,
+        "Origin": upstream_site.rstrip("/"),
     }
 
     client = httpx.AsyncClient(timeout=30, follow_redirects=True)
