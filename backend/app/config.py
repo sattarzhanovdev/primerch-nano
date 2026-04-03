@@ -47,5 +47,8 @@ class Settings:
     # Example: https://your-worker.your-subdomain.workers.dev
     EXTERNAL_IMAGE_PROXY_BASE: str = _env("EXTERNAL_IMAGE_PROXY_BASE", "")
 
+    # Make /api/generate return fast (queued job) instead of waiting on upstream.
+    GENERATE_ASYNC: int = _env_int("GENERATE_ASYNC", 1)
+
 
 settings = Settings()

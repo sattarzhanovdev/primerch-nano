@@ -48,6 +48,20 @@ class KieClient:
             res.raise_for_status()
             return res.json()
 
+    async def gpt4o_image_generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        url = f"{self.api_base.rstrip('/')}/api/v1/gpt4o-image/generate"
+        async with httpx.AsyncClient(timeout=120) as client:
+            res = await client.post(url, json=payload, headers={**self._headers(), "Content-Type": "application/json"})
+            res.raise_for_status()
+            return res.json()
+
+    async def gpt4o_image_record_info(self, task_id: str) -> Dict[str, Any]:
+        url = f"{self.api_base.rstrip('/')}/api/v1/gpt4o-image/record-info"
+        async with httpx.AsyncClient(timeout=30) as client:
+            res = await client.get(url, params={"taskId": task_id}, headers=self._headers())
+            res.raise_for_status()
+            return res.json()
+
     async def file_url_upload(self, file_url: str, *, upload_path: str = "primerch") -> Dict[str, Any]:
         url = f"{self.file_upload_base.rstrip('/')}/api/file-url-upload"
         # KIE expects `fileUrl` (downloadable URL).

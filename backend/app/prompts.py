@@ -16,10 +16,12 @@ class PromptInputs:
 
 
 PLACEMENT_HINTS: dict[str, str] = {
-    "right_sleeve": "ONLY on the wearer's right sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
-    "left_sleeve": "ONLY on the wearer's left sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
-    "wearer_right_sleeve": "ONLY on the wearer's right sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
-    "wearer_left_sleeve": "ONLY on the wearer's left sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
+    # NOTE: do not prefix with "ONLY" here; we add "ONLY" explicitly in placement locks
+    # to avoid "ONLY ONLY ..." ambiguity in prompts.
+    "right_sleeve": "on the wearer's right sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
+    "left_sleeve": "on the wearer's left sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
+    "wearer_right_sleeve": "on the wearer's right sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
+    "wearer_left_sleeve": "on the wearer's left sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
     "chest": "on the chest area",
     "back": "on the upper back",
     "front": "on the front area",
@@ -185,7 +187,7 @@ def _build_focus_block(placement_key: str) -> str:
 FOCUS / CROPPING (SLEEVE):
 - Output EXACTLY ONE photo (single frame). Do NOT create a diptych, collage, split panel, or multi-view layout.
 - Make this a close-up shot focused ONLY on the target sleeve area.
-- Do NOT show the full body. Avoid showing the face. Avoid showing the whole torso.
+- Do NOT show the full body. Avoid showing the face. Avoid showing the whole torso and chest area.
 - The sleeve should fill most of the frame.
 - The application must sit below the shoulder seam and above the sleeve cuff.
 - The application must NOT touch the collar/neckline.
@@ -211,9 +213,15 @@ SLEEVE PLACEMENT LOCK:
 - Do NOT place it on the chest or front torso.
 - Do NOT let the text drift upward toward the collar.
 - Do NOT let the design cross garment panel boundaries.
-- If the model is facing the camera, the wearer's right sleeve will usually appear on the LEFT side of the image.
-- Preserve the wearer's true anatomical side.
+- RIGHT sleeve means the sleeve attached to the wearer's RIGHT arm (anatomical right), regardless of where it appears in the photo.
+- Do NOT decide the side by “left/right side of the image”. The camera angle may swap sides.
+- Preserve the wearer's true anatomical side at all times.
 - The non-target sleeve must remain blank.
+- If the sleeve is not clearly visible in the original photo, adjust the pose/camera so the RIGHT sleeve becomes the primary visible area (do NOT move the design to the chest).
+
+FINAL CHECK (CRITICAL):
+- Before finalizing the output, verify the design is on the WEARER'S RIGHT sleeve (and NOT on chest/back/left sleeve).
+- If it is not on the right sleeve, redo the placement to the right sleeve.
 """.strip()
 
     if placement_key in {"left_sleeve", "wearer_left_sleeve"}:
@@ -228,9 +236,15 @@ SLEEVE PLACEMENT LOCK:
 - Do NOT place it on the chest or front torso.
 - Do NOT let the text drift upward toward the collar.
 - Do NOT let the design cross garment panel boundaries.
-- If the model is facing the camera, the wearer's left sleeve will usually appear on the RIGHT side of the image.
-- Preserve the wearer's true anatomical side.
+- LEFT sleeve means the sleeve attached to the wearer's LEFT arm (anatomical left), regardless of where it appears in the photo.
+- Do NOT decide the side by “left/right side of the image”. The camera angle may swap sides.
+- Preserve the wearer's true anatomical side at all times.
 - The non-target sleeve must remain blank.
+- If the sleeve is not clearly visible in the original photo, adjust the pose/camera so the LEFT sleeve becomes the primary visible area (do NOT move the design to the chest).
+
+FINAL CHECK (CRITICAL):
+- Before finalizing the output, verify the design is on the WEARER'S LEFT sleeve (and NOT on chest/back/right sleeve).
+- If it is not on the left sleeve, redo the placement to the left sleeve.
 """.strip()
 
     return ""
@@ -384,6 +398,7 @@ POSITION ANCHOR:
 def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     placement = PLACEMENT_HINTS.get(inputs.placement, inputs.placement)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
+    is_sleeve = inputs.placement in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}
 
     scene_block = _build_scene_block(
         scene_mode=inputs.scene_mode,
@@ -397,13 +412,34 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     fidelity_block = _build_source_fidelity_block(inputs.source_kind, inputs.source_text)
     surface_block = _build_surface_conformity_block(inputs.source_kind)
     sleeve_exclusion_block = _build_sleeve_exclusion_block(inputs.placement)
+    position_anchor_block = _build_position_anchor_block(inputs.placement)
 
     orientation_priority_block = ""
-    if inputs.placement in {"right_sleeve", "left_sleeve"}:
+    if is_sleeve:
         orientation_priority_block = """
 SLEEVE ORIENTATION PRIORITY:
 - Sleeve placements always refer to the WEARER'S anatomical side.
+- Do NOT infer sleeve side from the photo layout, camera angle, framing, mirroring, or “left/right side of the image”.
 - Viewer perspective must never override the wearer's true left/right side.
+""".strip()
+
+    strict_placement_lock = f"""
+PLACEMENT LOCK (CRITICAL):
+- Apply the design ONLY {placement}.
+- Do NOT place it anywhere else.
+- Do NOT add duplicates.
+- Do NOT add a second placement on chest/back/sleeves/other sides.
+- If any part of the design appears outside the target area, fix it so the entire design stays ONLY in the target area.
+""".strip()
+
+    sleeve_extra_lock = ""
+    if is_sleeve:
+        sleeve_extra_lock = """
+SLEEVE-ONLY OUTPUT (CRITICAL):
+- The chest/front torso must remain completely blank and unchanged (no design there).
+- The final photo must prioritize the target sleeve area; keep the chest mostly out of frame.
+- Do NOT “compromise” by placing the design on the chest because it is more visible.
+- Prefer a 3/4 pose where the target sleeve is closest to the camera and fully visible.
 """.strip()
 
     return f"""
@@ -435,7 +471,13 @@ STRICT EDIT SCOPE:
 
 {orientation_priority_block}
 
+{position_anchor_block}
+
 {sleeve_exclusion_block}
+
+{strict_placement_lock}
+
+{sleeve_extra_lock}
 
 {surface_block}
 

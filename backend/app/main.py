@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 import sys
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from .kie import extract_uploaded_file_url, get_client, parse_result_json
 from .prompts import PromptInputs, build_nanobanana_prompt
@@ -34,6 +38,20 @@ app.add_middleware(
 
 _callback_store: Dict[str, Any] = {}
 _kie_cache = KieUploadCache(repo_root() / "uploads" / "kie_upload_cache.json")
+
+
+@dataclass
+class GenerateJob:
+    job_id: str
+    created_at: float
+    updated_at: float
+    state: str  # queued|submitting|submitted|failed
+    error: str = ""
+    kie_task_id: str = ""
+    request_payload: Optional[Dict[str, Any]] = None
+
+
+_jobs: Dict[str, GenerateJob] = {}
 
 
 def _base_json_path() -> Path:
@@ -279,6 +297,7 @@ async def public_config() -> Dict[str, Any]:
     return {
         "externalImageProxyBase": (settings.EXTERNAL_IMAGE_PROXY_BASE or "").strip(),
         "imageProxyEnabled": bool(settings.IMAGE_PROXY_ENABLED),
+        "generateAsync": bool(settings.GENERATE_ASYNC),
     }
 
 
@@ -306,16 +325,32 @@ async def image_proxy(url: str) -> Response:
     if host not in _proxy_allowed_hosts():
         raise HTTPException(status_code=400, detail=f"host not allowed: {host}")
 
-    headers = {"User-Agent": "Mozilla/5.0 (image-proxy)"}
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        upstream = await client.get(url, headers=headers)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Primerch image proxy)",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }
 
+    client = httpx.AsyncClient(timeout=30, follow_redirects=True)
+    stream_ctx = client.stream("GET", url, headers=headers)
+    upstream = await stream_ctx.__aenter__()
     if upstream.status_code >= 400:
+        await stream_ctx.__aexit__(None, None, None)
+        await client.aclose()
         raise HTTPException(status_code=502, detail=f"upstream {upstream.status_code}")
 
     content_type = upstream.headers.get("content-type", "application/octet-stream")
+
+    async def _close() -> None:
+        await stream_ctx.__aexit__(None, None, None)
+        await client.aclose()
+
     cache = "public, max-age=3600"
-    return Response(content=upstream.content, media_type=content_type, headers={"Cache-Control": cache})
+    return StreamingResponse(
+        upstream.aiter_bytes(),
+        media_type=content_type,
+        headers={"Cache-Control": cache},
+        background=BackgroundTask(_close),
+    )
 
 
 if settings.DEBUG_ROUTES:
@@ -397,6 +432,7 @@ async def upload_image(request: Request, file: UploadFile = File(...)) -> Dict[s
 @app.post("/api/generate")
 async def generate(
     request: Request,
+    background_tasks: BackgroundTasks,
     payload: Dict[str, Any] = Body(...),
 ) -> Dict[str, Any]:
     """
@@ -466,15 +502,17 @@ async def generate(
 
     client = get_client()
 
-    async def to_kie_file_url(source_url: str, *, upload_path: str = "primerch") -> str:
+    def _server_base_url() -> str:
+        return build_file_url(request, "/").rstrip("/")
+
+    async def to_kie_file_url(source_url: str, *, server_base: str, upload_path: str = "primerch") -> str:
         if settings.KIE_UPLOAD_CACHE:
             cached = _kie_cache.get(source_url)
             if cached:
                 return cached
 
         # If the URL points to our own /uploads, we can stream-upload without public exposure.
-        base = build_file_url(request, "/").rstrip("/")
-        if source_url.startswith(base + "/uploads/"):
+        if source_url.startswith(server_base + "/uploads/"):
             name = source_url.split("/uploads/", 1)[1].split("?", 1)[0]
             local = uploads_dir() / name
             if not local.exists():
@@ -504,29 +542,112 @@ async def generate(
             _kie_cache.set(source_url, str(file_url))
         return str(file_url)
 
-    product_kie_url = await to_kie_file_url(product_image_url)
-    logo_kie_url = await to_kie_file_url(logo_url)
+    def _extract_task_id(create_task_resp: Any) -> str:
+        if isinstance(create_task_resp, dict):
+            data = create_task_resp.get("data")
+            if isinstance(data, dict):
+                tid = data.get("taskId") or data.get("task_id") or data.get("id")
+                if tid:
+                    return str(tid)
+        return ""
 
+    async def _submit_job(job_id: str, server_base: str, job_payload: Dict[str, Any]) -> None:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        job.state = "submitting"
+        job.updated_at = time.time()
+        try:
+            product_kie_url = await to_kie_file_url(job_payload["productImageUrl"], server_base=server_base)
+            logo_kie_url = await to_kie_file_url(job_payload["logoUrl"], server_base=server_base)
+
+            kie_payload: Dict[str, Any] = {
+                "model": "nano-banana-2",
+                **({"callBackUrl": job_payload.get("callBackUrl")} if job_payload.get("callBackUrl") else {}),
+                "input": {
+                    "prompt": job_payload["prompt"],
+                    # KIE payload formats differ by model/version; send both keys for maximum compatibility.
+                    "image_input": [product_kie_url, logo_kie_url],
+                    "image_urls": [product_kie_url, logo_kie_url],
+                    "aspect_ratio": job_payload.get("image_size") or "4:3",
+                    "image_size": job_payload.get("image_size") or "4:3",
+                    "resolution": job_payload.get("resolution") or "1K",
+                    "output_format": job_payload.get("output_format") or "png",
+                },
+            }
+
+            res = await client.create_task(kie_payload)
+            tid = _extract_task_id(res)
+            job.kie_task_id = tid
+            job.state = "submitted" if tid else "failed"
+            job.error = "" if tid else f"Missing taskId in response: {res}"
+            job.request_payload = {"jobs/createTask": kie_payload, "createTaskResponse": res}
+            job.updated_at = time.time()
+        except Exception as e:
+            job.state = "failed"
+            job.error = str(e)
+            job.updated_at = time.time()
+
+    # Always return quickly (<=30s). Submit to upstream in background.
+    if settings.GENERATE_ASYNC:
+        job_id = uuid4().hex
+        now = time.time()
+        job = GenerateJob(job_id=job_id, created_at=now, updated_at=now, state="queued")
+        _jobs[job_id] = job
+
+        submit_payload = {
+            "prompt": prompt,
+            "productImageUrl": product_image_url,
+            "logoUrl": logo_url,
+            "callBackUrl": call_back_url,
+            "image_size": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
+            "resolution": (payload.get("resolution") or "1K"),
+            "output_format": (payload.get("output_format") or payload.get("outputFormat") or "png"),
+        }
+        background_tasks.add_task(_submit_job, job_id, _server_base_url(), submit_payload)
+        return {"provider": "kie", "jobId": job_id, "state": "queued"}
+
+    # Fallback sync mode (not recommended for strict latency).
+    product_kie_url = await to_kie_file_url(product_image_url, server_base=_server_base_url())
+    logo_kie_url = await to_kie_file_url(logo_url, server_base=_server_base_url())
     kie_payload: Dict[str, Any] = {
         "model": "nano-banana-2",
         **({"callBackUrl": call_back_url} if call_back_url else {}),
         "input": {
             "prompt": prompt,
+            # KIE payload formats differ by model/version; send both keys for maximum compatibility.
             "image_input": [product_kie_url, logo_kie_url],
-            "aspect_ratio": image_size or "auto",
+            "image_urls": [product_kie_url, logo_kie_url],
+            "aspect_ratio": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
+            "image_size": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
             "resolution": (payload.get("resolution") or "1K"),
             "output_format": (payload.get("output_format") or payload.get("outputFormat") or "png"),
-            "google_search": bool(payload.get("google_search") or payload.get("googleSearch") or False),
         },
     }
+    res = await client.create_task(kie_payload)
+    return {"provider": "kie", "request": kie_payload, "response": res, "kieTaskId": _extract_task_id(res)}
 
-    try:
-        res = await client.create_task(kie_payload)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"KIE error: {e}") from e
-    return {"provider": "kie", "request": kie_payload, "response": res}
+
+@app.get("/api/jobs/{job_id}")
+async def job_status(job_id: str) -> Dict[str, Any]:
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    out: Dict[str, Any] = {
+        "jobId": job.job_id,
+        "state": job.state,
+        "error": job.error,
+        "kieTaskId": job.kie_task_id or None,
+        "createdAt": job.created_at,
+        "updatedAt": job.updated_at,
+    }
+
+    if job.kie_task_id:
+        # Reuse existing task-details logic.
+        details = await task_details(job.kie_task_id)
+        out["task"] = details
+    return out
 
 
 @app.get("/api/tasks/{task_id}")
