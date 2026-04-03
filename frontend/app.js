@@ -19,8 +19,10 @@ const state = {
   pollTimer: null,
   tshirtView: "front", // front | back
   sceneMode: "on_model", // on_model | product_only
+  speedMode: "fast", // fast | quality
   externalImageProxyBase: "",
   imageProxyEnabled: true,
+  resolution: "720p",
   configLoaded: false,
 };
 
@@ -308,8 +310,11 @@ function renderCustomize() {
         el("div", { class: "hr" }),
         productPhotosPicker(p),
         el("div", { class: "hr" }),
-        el("label", { class: "subtitle" }, ["Сцена"]),
-        sceneModeSwitch(),
+        el("label", { class: "subtitle" }, ["Режим"]),
+        el("div", { style: "display:flex;gap:10px;flex-wrap:wrap;align-items:center;" }, [
+          sceneModeSwitch(),
+          speedModeSwitch(),
+        ]),
         el("div", { class: "hr" }),
         el("label", { class: "subtitle" }, ["Вид нанесения"]),
         applicationSelect(),
@@ -729,6 +734,19 @@ function sceneModeSwitch() {
   ]);
 }
 
+function speedModeSwitch() {
+  return el("div", { class: "seg" }, [
+    el("button", {
+      class: `btn ${state.speedMode === "fast" ? "success" : ""}`,
+      onclick: () => { state.speedMode = "fast"; render(); },
+    }, ["Быстро"]),
+    el("button", {
+      class: `btn ${state.speedMode === "quality" ? "success" : ""}`,
+      onclick: () => { state.speedMode = "quality"; render(); },
+    }, ["Качество"]),
+  ]);
+}
+
 async function onGenerate() {
   if (!state.selected) return;
   state.lastError = "";
@@ -762,9 +780,11 @@ async function onGenerate() {
     placement: state.placement,
     application: state.application,
     scene_mode: state.sceneMode,
+    speed_mode: state.speedMode,
     model_gender: state.gender === "male" ? "male" : state.gender === "female" ? "female" : "neutral",
     numImages: 1,
     image_size: "4:3",
+    resolution: state.resolution || "720p",
   };
   if (state.mode === "logo") body.logoUrl = state.logoUrl;
   if (state.mode === "text") body.text = state.text;

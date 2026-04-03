@@ -13,6 +13,7 @@ class PromptInputs:
     model_gender: str = "neutral"  # male | female | neutral
     source_kind: str = "logo"  # logo | text
     source_text: str = ""  # used when source_kind=text
+    speed_mode: str = "quality"  # quality | fast
 
 
 PLACEMENT_HINTS: dict[str, str] = {
@@ -69,6 +70,11 @@ SCENE RULES:
 - Preserve the original framing, product shape, and product presentation.
 - Do NOT redesign the scene.
 - Keep the target placement area clearly visible.
+
+GARMENT IDENTITY LOCK (CRITICAL):
+- The product in the output must be the EXACT same product as in the first image.
+- Do NOT change garment color, fabric texture, weave, material finish, seams, stitching, buttons, collar, cuffs, hem, or silhouette.
+- Do NOT swap the product for a different garment, even if it looks similar.
 """.strip()
 
     gender_map = {
@@ -90,8 +96,10 @@ SCENE RULES:
 SCENE RULES:
 - Present the product worn by a realistic {model_text}.
 - The result must look like a real commercial fashion photograph, not AI art.
-- Keep the garment itself consistent with the first image.
-- Do NOT redesign the garment, and do NOT change the cut, fit, silhouette, sleeve shape, collar, hem, or material.
+- Keep the garment itself EXACTLY consistent with the first image.
+- Do NOT redesign, replace, restyle, recolor, or “upgrade” the garment.
+- Do NOT change the cut, fit, silhouette, sleeve shape, collar, placket, buttons, hem, fabric texture, or material appearance.
+- Do NOT alter the garment’s base color, shading, pattern, weave, or fabric grain.
 - Use professional studio lighting, soft realistic shadows, clean styling, and natural body proportions.
 - Frame the subject like an ecommerce apparel photoshoot.
 - Keep the target placement area clearly visible and unobstructed.
@@ -358,6 +366,18 @@ SURFACE CONFORMITY:
 - Keep the design scale realistic for the product.
 """.strip()
 
+def _canonicalize_placement(placement_key: str) -> str:
+    """
+    Normalize placement keys so prompts always refer to the wearer's anatomical side.
+    Frontend may send either `right_sleeve/left_sleeve` or `wearer_right_sleeve/wearer_left_sleeve`.
+    """
+    key = (placement_key or "").strip()
+    if key == "right_sleeve":
+        return "wearer_right_sleeve"
+    if key == "left_sleeve":
+        return "wearer_left_sleeve"
+    return key
+
 def _build_sleeve_exclusion_block(placement_key: str) -> str:
     if placement_key not in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
         return ""
@@ -396,23 +416,64 @@ POSITION ANCHOR:
     return ""
 
 def build_nanobanana_prompt(inputs: PromptInputs) -> str:
-    placement = PLACEMENT_HINTS.get(inputs.placement, inputs.placement)
+    placement_key = _canonicalize_placement(inputs.placement)
+    placement = PLACEMENT_HINTS.get(placement_key, placement_key)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
-    is_sleeve = inputs.placement in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}
+    is_sleeve = placement_key in {"wearer_right_sleeve", "wearer_left_sleeve"}
+
+    if (inputs.speed_mode or "").strip().lower() == "fast":
+        # Ultra-compact prompt to reduce model overhead and speed up generation.
+        fidelity = _build_source_fidelity_block(inputs.source_kind, inputs.source_text)
+        sleeve_lock = _build_side_disambiguation_block(placement_key) if is_sleeve else ""
+        focus = _build_focus_block(placement_key) if is_sleeve else ""
+        garment_lock = """
+GARMENT LOCK (CRITICAL):
+- Keep the garment/product EXACTLY the same as the first image.
+- Do NOT change color, fabric texture, seams, collar, cuffs, hem, buttons, or silhouette.
+- Do NOT replace the product with a different one.
+""".strip()
+
+        placement_lock = f"""
+PLACEMENT LOCK (CRITICAL):
+- Place the design ONLY {placement}.
+- No duplicates anywhere else (no chest/back/other sleeve).
+""".strip()
+
+        return f"""
+Use image 1 as the product reference. Use image 2 as the exact design source.
+
+TASK:
+Apply the provided design as {application} {placement} on the product in image 1 ("{inputs.product_title}").
+
+{fidelity}
+
+{garment_lock}
+
+{focus}
+
+{sleeve_lock}
+
+{placement_lock}
+
+SCENE:
+- Photorealistic ecommerce studio photo.
+- Keep the target area clearly visible.
+- Output aspect ratio: {inputs.aspect_ratio}.
+""".strip()
 
     scene_block = _build_scene_block(
         scene_mode=inputs.scene_mode,
         model_gender=inputs.model_gender,
         source_kind=inputs.source_kind,
     )
-    focus_block = _build_focus_block(inputs.placement)
-    side_block = _build_side_disambiguation_block(inputs.placement)
+    focus_block = _build_focus_block(placement_key)
+    side_block = _build_side_disambiguation_block(placement_key)
     material_block = _build_material_block(inputs.application, inputs.source_kind)
     negative_block = _build_negative_block(inputs.source_kind)
     fidelity_block = _build_source_fidelity_block(inputs.source_kind, inputs.source_text)
     surface_block = _build_surface_conformity_block(inputs.source_kind)
-    sleeve_exclusion_block = _build_sleeve_exclusion_block(inputs.placement)
-    position_anchor_block = _build_position_anchor_block(inputs.placement)
+    sleeve_exclusion_block = _build_sleeve_exclusion_block(placement_key)
+    position_anchor_block = _build_position_anchor_block(placement_key)
 
     orientation_priority_block = ""
     if is_sleeve:
