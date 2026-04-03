@@ -104,6 +104,64 @@ def parse_result_json(result_json: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def extract_result_urls_any(resp: Any) -> list[str]:
+    """
+    Best-effort extraction of result image URLs across different KIE endpoints.
+    """
+    def _is_url(s: Any) -> bool:
+        return isinstance(s, str) and s.startswith("http")
+
+    def _scan(node: Any, *, depth: int) -> list[str]:
+        if depth <= 0:
+            return []
+        out: list[str] = []
+        if isinstance(node, dict):
+            # High-signal keys first.
+            for key in ("resultUrls", "result_urls", "resultUrl", "result_url"):
+                val = node.get(key)
+                if isinstance(val, list):
+                    out.extend([str(u) for u in val if _is_url(u)])
+                elif _is_url(val):
+                    out.append(str(val))
+            for key in ("images", "imageUrls", "image_urls", "urls"):
+                val = node.get(key)
+                if isinstance(val, list):
+                    for it in val:
+                        if _is_url(it):
+                            out.append(str(it))
+                        elif isinstance(it, dict):
+                            u = it.get("url") or it.get("imageUrl") or it.get("image_url")
+                            if _is_url(u):
+                                out.append(str(u))
+            # Recurse into common nested containers (gpt4o-image uses `data.response.resultUrls`,
+            # callbacks may use `data.info.result_urls`).
+            for k, v in node.items():
+                if k in {"resultUrls", "result_urls", "images", "imageUrls", "image_urls"}:
+                    continue
+                if isinstance(v, (dict, list)):
+                    out.extend(_scan(v, depth=depth - 1))
+        elif isinstance(node, list):
+            for it in node:
+                if _is_url(it):
+                    out.append(str(it))
+                elif isinstance(it, (dict, list)):
+                    out.extend(_scan(it, depth=depth - 1))
+        return out
+
+    if not isinstance(resp, dict):
+        return []
+    urls = _scan(resp, depth=5)
+    # Deduplicate but preserve order.
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for u in urls:
+        if u in seen:
+            continue
+        seen.add(u)
+        uniq.append(u)
+    return uniq
+
+
 def extract_uploaded_file_url(resp: Dict[str, Any]) -> Optional[str]:
     data = resp.get("data") or {}
     if not isinstance(data, dict):
