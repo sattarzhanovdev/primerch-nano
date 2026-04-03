@@ -332,7 +332,12 @@ async def image_proxy(url: str) -> Response:
 
     client = httpx.AsyncClient(timeout=30, follow_redirects=True)
     stream_ctx = client.stream("GET", url, headers=headers)
-    upstream = await stream_ctx.__aenter__()
+    try:
+        upstream = await stream_ctx.__aenter__()
+    except httpx.HTTPError as e:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"upstream connect failed: {e}") from e
+
     if upstream.status_code >= 400:
         await stream_ctx.__aexit__(None, None, None)
         await client.aclose()
@@ -341,8 +346,10 @@ async def image_proxy(url: str) -> Response:
     content_type = upstream.headers.get("content-type", "application/octet-stream")
 
     async def _close() -> None:
-        await stream_ctx.__aexit__(None, None, None)
-        await client.aclose()
+        try:
+            await stream_ctx.__aexit__(None, None, None)
+        finally:
+            await client.aclose()
 
     cache = "public, max-age=3600"
     return StreamingResponse(
