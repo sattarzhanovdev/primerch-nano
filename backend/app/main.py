@@ -471,6 +471,7 @@ async def generate(
     num_images = int(payload.get("numImages") or 1)
     scene_mode = (payload.get("scene_mode") or payload.get("sceneMode") or "on_model").strip()
     model_gender = (payload.get("model_gender") or payload.get("modelGender") or "neutral").strip()
+    speed_mode = (payload.get("speed_mode") or payload.get("speedMode") or "quality").strip()
 
     if not product_id and not product_article:
         raise HTTPException(status_code=400, detail="productId or productArticle is required")
@@ -508,6 +509,7 @@ async def generate(
             model_gender=model_gender,
             source_kind=source_kind,
             source_text=text_value if source_kind == "text" else "",
+            speed_mode=speed_mode,
         )
     )
 
