@@ -413,6 +413,42 @@ SURFACE CONFORMITY:
 - Keep the design scale realistic for the product.
 """.strip()
 
+def _build_scale_lock_block(placement_key: str, source_kind: str) -> str:
+    key = (placement_key or "").strip()
+    kind = (source_kind or "").strip().lower()
+
+    if key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve", "chest"}:
+        target_size = "about 18-28% of the garment width / sleeve panel width"
+    elif key in {"front", "belly", "back"}:
+        target_size = "about 20-35% of the printable area width"
+    elif key in {"mug_left", "mug_right"}:
+        target_size = "about 22-32% of the mug body width"
+    elif key == "mug_wrap":
+        target_size = "about 45-60% of the printable wrap width"
+    else:
+        target_size = "about 18-30% of the target area width"
+
+    if kind == "text":
+        return f"""
+DESIGN SCALE (CRITICAL):
+- Keep the text at a commercially realistic size.
+- Default to a modest readable size, not an oversized statement graphic.
+- Leave clear blank product area around the text.
+- For this placement, keep the visible text around {target_size}.
+- If uncertain, choose the smaller believable size.
+- Do NOT let the text fill most of the target area or dominate the full product photo.
+""".strip()
+
+    return f"""
+LOGO SCALE (CRITICAL):
+- Keep the logo small-to-medium and commercially realistic.
+- Do NOT upscale the logo aggressively just because image 2 is tightly cropped.
+- Leave clear blank product area around the logo.
+- For this placement, keep the visible logo around {target_size}.
+- If uncertain, choose the smaller believable size.
+- Never let the logo fill most of the target area or become the main subject of the photo.
+""".strip()
+
 def _canonicalize_placement(placement_key: str) -> str:
     """
     Normalize placement keys so prompts always refer to the wearer's anatomical side.
@@ -472,6 +508,7 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
         # Ultra-compact prompt to reduce model overhead and speed up generation.
         fidelity = _build_source_fidelity_block(inputs.source_kind, inputs.source_text)
         no_invention = _build_no_invention_block(inputs.source_kind)
+        scale_lock = _build_scale_lock_block(placement_key, inputs.source_kind)
         sleeve_lock = _build_side_disambiguation_block(placement_key) if is_sleeve else ""
         focus = _build_focus_block(placement_key) if is_sleeve else ""
         scene = _build_fast_scene_block(inputs.scene_mode, inputs.model_gender)
@@ -509,6 +546,8 @@ Apply the provided design as {application} {placement} on the product in image 1
 
 {no_invention}
 
+{scale_lock}
+
 {garment_lock}
 
 {focus}
@@ -535,6 +574,7 @@ Apply the provided design as {application} {placement} on the product in image 1
     fidelity_block = _build_source_fidelity_block(inputs.source_kind, inputs.source_text)
     no_invention_block = _build_no_invention_block(inputs.source_kind)
     surface_block = _build_surface_conformity_block(inputs.source_kind)
+    scale_lock_block = _build_scale_lock_block(placement_key, inputs.source_kind)
     sleeve_exclusion_block = _build_sleeve_exclusion_block(placement_key)
     position_anchor_block = _build_position_anchor_block(placement_key)
 
@@ -576,6 +616,8 @@ on the product in the first image ("{inputs.product_title}").
 {fidelity_block}
 
 {no_invention_block}
+
+{scale_lock_block}
 
 STRICT EDIT SCOPE:
 - Change only what is necessary to place the provided design realistically.
