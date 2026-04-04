@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +20,8 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
+from PIL import Image
+
 from .kie import (
     close_http_client,
     extract_result_urls_any,
@@ -27,7 +31,7 @@ from .kie import (
     parse_result_json,
 )
 from .image_refs import optimize_logo_reference
-from .prompts import PromptInputs, build_nanobanana_prompt
+from .prompts import PromptInputs, build_gpt_image_prompt, build_nanobanana_prompt
 from .config import settings
 from .kie_cache import KieUploadCache
 from .storage import build_file_url, repo_root, save_upload_image, uploads_dir
@@ -36,6 +40,7 @@ from .url_utils import is_public_http_url
 
 
 app = FastAPI(title="Primerch KIE Image API", version="0.1.0")
+_BUILD_ID = "2026-04-04.2"
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,6 +52,9 @@ app.add_middleware(
 
 _callback_store: Dict[str, Any] = {}
 _kie_cache = KieUploadCache(repo_root() / "uploads" / "kie_upload_cache.json")
+_transformed_url_cache: Dict[str, str] = {}
+_task_transform_store: Dict[str, Dict[str, Any]] = {}
+_input_transform_cache: Dict[str, str] = {}
 
 
 @dataclass
@@ -113,6 +121,11 @@ def _coerce_provider(payload: Dict[str, Any]) -> str:
         return "kie_gpt4o_image"
     return "kie_jobs"
 
+_ALLOWED_KIE_JOBS_MODELS: set[str] = {
+    "wan/2-7-image",
+    "wan/2-7-image-pro",
+}
+
 
 def _provider_was_explicit(payload: Dict[str, Any]) -> bool:
     for key in ("provider", "kieProvider", "kie_provider", "model", "kieModel", "kie_model"):
@@ -135,24 +148,199 @@ def _map_to_gpt4o_size(aspect: str) -> str:
     # Default landscape
     return "3:2"
 
+def _parse_ratio(r: str) -> Optional[float]:
+    raw = (r or "").strip()
+    if not raw:
+        return None
+    if ":" not in raw:
+        return None
+    a, b = raw.split(":", 1)
+    try:
+        x = float(a)
+        y = float(b)
+    except ValueError:
+        return None
+    if x <= 0 or y <= 0:
+        return None
+    return x / y
+
+
+def _map_to_kie_gpt_image_aspect_ratio(requested: str) -> str:
+    """
+    GPT Image 1.5 on KIE only supports a limited set of aspect ratios.
+    We keep our product/UI ratio at 3:4, but map the upstream request to the closest allowed option.
+    """
+    allowed = ("1:1", "3:2", "2:3")
+    req = _parse_ratio(requested) or _parse_ratio("3:4") or 0.75
+    best = "2:3"
+    best_dist = 1e9
+    for a in allowed:
+        val = _parse_ratio(a)
+        if val is None:
+            continue
+        dist = abs(val - req)
+        if dist < best_dist:
+            best = a
+            best_dist = dist
+    return best
+
+
+def _center_crop_to_aspect(img: Image.Image, *, target_aspect: str) -> Image.Image:
+    target = _parse_ratio(target_aspect)
+    if target is None:
+        return img
+
+    w, h = img.size
+    if w <= 0 or h <= 0:
+        return img
+    cur = w / h
+
+    # Close enough: keep as-is.
+    if abs(cur - target) <= 0.01:
+        return img
+
+    if cur > target:
+        # Too wide -> crop width.
+        new_w = int(round(h * target))
+        new_w = max(1, min(new_w, w))
+        left = (w - new_w) // 2
+        box = (left, 0, left + new_w, h)
+        return img.crop(box)
+    # Too tall -> crop height.
+    new_h = int(round(w / target))
+    new_h = max(1, min(new_h, h))
+    top = (h - new_h) // 2
+    box = (0, top, w, top + new_h)
+    return img.crop(box)
+
+
+async def _transform_input_image_to_upload_url(
+    source_url: str,
+    *,
+    server_base: str,
+    target_aspect: str = "3:4",
+    max_height: int = 720,
+) -> str:
+    """
+    Some upstream models validate the aspect ratio of the *input image*.
+    To enforce 3:4 pipelines, we materialize a cropped (and optionally downscaled) copy under /uploads.
+    """
+    src = (source_url or "").strip()
+    if not src:
+        return source_url
+    cache_key = f"{src}|in_aspect={target_aspect}|h={int(max_height or 0)}"
+    cached = _input_transform_cache.get(cache_key)
+    if cached:
+        return cached
+
+    blob: bytes | None = None
+    if src.startswith(server_base + "/uploads/"):
+        name = src.split("/uploads/", 1)[1].split("?", 1)[0]
+        local = uploads_dir() / name
+        if local.exists():
+            blob = local.read_bytes()
+    elif is_public_http_url(src):
+        client = get_http_client()
+        res = await client.get(src, timeout=30, follow_redirects=True)
+        res.raise_for_status()
+        blob = res.content
+
+    if not blob:
+        return source_url
+
+    img = Image.open(io.BytesIO(blob))
+    img.load()
+    fixed = _center_crop_to_aspect(img, target_aspect=target_aspect)
+    if max_height:
+        h = int(max_height)
+        w = max(1, int(round(fixed.size[0] * (h / fixed.size[1]))))
+        fixed = fixed.resize((w, h), resample=Image.Resampling.LANCZOS)
+
+    out = io.BytesIO()
+    fixed.convert("RGB").save(out, format="JPEG", quality=90, optimize=True)
+    out_bytes = out.getvalue()
+    if len(out_bytes) > settings.MAX_UPLOAD_BYTES:
+        return source_url
+
+    filename = f"kie_input_{secrets.token_hex(12)}.jpg"
+    path = uploads_dir() / filename
+    path.write_bytes(out_bytes)
+    upload_url = server_base.rstrip("/") + f"/uploads/{filename}"
+    _input_transform_cache[cache_key] = upload_url
+    return upload_url
+
+
+async def _fetch_and_fix_ratio(
+    request: Request,
+    url: str,
+    *,
+    target_aspect: str = "3:4",
+    max_height: int = 0,
+) -> str:
+    raw_url = (url or "").strip()
+    if not raw_url or not is_public_http_url(raw_url):
+        return url
+
+    cache_key = f"{raw_url}|aspect={target_aspect}|h={int(max_height or 0)}"
+    cached = _transformed_url_cache.get(cache_key)
+    if cached:
+        return cached
+
+    client = get_http_client()
+    res = await client.get(raw_url, timeout=30, follow_redirects=True)
+    res.raise_for_status()
+    blob = res.content
+    if not blob:
+        return url
+
+    img = Image.open(io.BytesIO(blob))
+    img.load()
+    fixed = _center_crop_to_aspect(img, target_aspect=target_aspect)
+    if max_height:
+        h = int(max_height)
+        w = max(1, int(round(fixed.size[0] * (h / fixed.size[1]))))
+        fixed = fixed.resize((w, h), resample=Image.Resampling.LANCZOS)
+    out = io.BytesIO()
+    fixed.save(out, format="PNG", optimize=True)
+    out_bytes = out.getvalue()
+    if len(out_bytes) > settings.MAX_UPLOAD_BYTES:
+        out = io.BytesIO()
+        fixed.convert("RGB").save(out, format="JPEG", quality=90, optimize=True)
+        out_bytes = out.getvalue()
+        if len(out_bytes) > settings.MAX_UPLOAD_BYTES:
+            return url
+
+    # Reuse uploads infrastructure (served by FastAPI static files).
+    ext = ".jpg" if out_bytes[:2] == b"\xff\xd8" else ".png"
+    filename = f"kie_ratio_{secrets.token_hex(12)}{ext}"
+    path = uploads_dir() / filename
+    path.write_bytes(out_bytes)
+    fixed_url = build_file_url(request, f"/uploads/{filename}")
+    _transformed_url_cache[cache_key] = fixed_url
+    return fixed_url
+
+
+def _normalize_requested_resolution(raw: str) -> str:
+    r = (raw or "").strip().lower()
+    if r in {"720p", "1k", "2k", "4k"}:
+        return r.upper() if r != "720p" else "720p"
+    return "1K"
+
+
+def _upstream_resolution_for(requested: str) -> str:
+    """
+    KIE jobs/createTask rejects unsupported values like 720p. Always send an accepted value upstream.
+    """
+    if (requested or "").strip().lower() == "720p":
+        return "1K"
+    return requested or "1K"
+
 
 def _resolve_resolution(raw_resolution: str, speed_mode: str) -> str:
-    resolution = (raw_resolution or "").strip().lower()
-    allowed = {
-        "1k": "1K",
-        "2k": "2K",
-        "4k": "4K",
-    }
-    if resolution == "720p":
-        return "1K"
-    if resolution in allowed:
-        return allowed[resolution]
-
-    # KIE jobs/createTask rejects unsupported values like 720p.
-    # Keep fast mode fast via prompt simplification and asset prewarm,
-    # but send a resolution value the upstream actually accepts.
+    # Keep the requested resolution (incl. 720p) so we can post-process results,
+    # but upstream may require mapping to accepted values.
     _ = (speed_mode or "").strip().lower()
-    return "1K"
+    return _normalize_requested_resolution(raw_resolution)
 
 
 def _server_base_url(request: Request) -> str:
@@ -592,7 +780,7 @@ async def _shutdown_clients() -> None:
 
 @app.get("/api/health")
 async def health() -> Dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "build": _BUILD_ID}
 
 @app.head("/")
 async def head_root() -> Response:
@@ -774,7 +962,8 @@ async def generate(
     product_article = (payload.get("productArticle") or "").strip()
     placement = (payload.get("placement") or "").strip()
     application = (payload.get("application") or "embroidery").strip()
-    image_size = (payload.get("image_size") or payload.get("imageSize") or "4:3").strip()
+    # We standardize on 3:4 everywhere (frontend + prompts + upstream).
+    image_size = (payload.get("image_size") or payload.get("imageSize") or "3:4").strip() or "3:4"
     scene_mode = (payload.get("scene_mode") or payload.get("sceneMode") or "on_model").strip()
     model_gender = (payload.get("model_gender") or payload.get("modelGender") or "neutral").strip()
     speed_mode = (payload.get("speed_mode") or payload.get("speedMode") or "quality").strip()
@@ -782,14 +971,19 @@ async def generate(
     kie_provider = _coerce_provider(payload)
     kie_model = (payload.get("model") or payload.get("kieModel") or payload.get("kie_model") or "").strip()
     if not kie_model and kie_provider == "kie_jobs":
-        kie_model = "nano-banana-2"
+        kie_model = "wan/2-7-image-pro"
+    if kie_provider == "kie_jobs" and kie_model and kie_model not in _ALLOWED_KIE_JOBS_MODELS:
+        # Be permissive: clients may have cached older defaults.
+        # Force to the supported default instead of failing the request.
+        kie_model = "wan/2-7-image-pro"
 
     # gpt4o-image has a restricted set of sizes; align prompt + request size.
     prompt_aspect_ratio = image_size
     gpt4o_size = ""
     if kie_provider == "kie_gpt4o_image":
         gpt4o_size = (payload.get("size") or "").strip() or _map_to_gpt4o_size(image_size)
-        prompt_aspect_ratio = gpt4o_size
+        # Keep prompts in our canonical ratio even if upstream endpoint has limited size options.
+        prompt_aspect_ratio = image_size
 
     if not product_id and not product_article:
         raise HTTPException(status_code=400, detail="productId or productArticle is required")
@@ -822,19 +1016,21 @@ async def generate(
     elif logo_url:
         logo_url = optimize_logo_reference(request, logo_url)
 
-    prompt = build_nanobanana_prompt(
-        PromptInputs(
-            product_title=_product_prompt_title(product),
-            application=application,
-            placement=placement,
-            aspect_ratio=prompt_aspect_ratio,
-            scene_mode=scene_mode,
-            model_gender=model_gender,
-            source_kind=source_kind,
-            source_text=text_value if source_kind == "text" else "",
-            speed_mode=speed_mode,
-        )
+    prompt_inputs = PromptInputs(
+        product_title=_product_prompt_title(product),
+        application=application,
+        placement=placement,
+        aspect_ratio=prompt_aspect_ratio,
+        scene_mode=scene_mode,
+        model_gender=model_gender,
+        source_kind=source_kind,
+        source_text=text_value if source_kind == "text" else "",
+        speed_mode=speed_mode,
     )
+    if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:
+        prompt = build_gpt_image_prompt(prompt_inputs)
+    else:
+        prompt = build_nanobanana_prompt(prompt_inputs)
 
     # Build callback only if PUBLIC_BASE_URL is configured (otherwise polling-only).
     call_back_url = (payload.get("callBackUrl") or "").strip()
@@ -878,17 +1074,73 @@ async def generate(
             res = await client.gpt4o_image_generate(kie_payload)
             return kie_payload, res
 
+        model_name = str(submit_payload.get("model") or "").strip()
+
+        # KIE market model: GPT Image 1.5.
+        # Docs: requires `input.input_urls`, `prompt`, `aspect_ratio`, `quality`.
+        # (Unlike nano-banana models, it does not use `image_urls` / `image_input`.)
+        if model_name in {"gpt-image/1.5-image-to-image", "gpt-image/1.5-text-to-image"}:
+            raw_quality = str(submit_payload.get("quality") or "").strip().lower()
+            if raw_quality not in {"medium", "high"}:
+                raw_speed = str(submit_payload.get("speed_mode") or "").strip().lower()
+                raw_quality = "medium" if raw_speed in {"fast", "speed", "turbo"} else "high"
+
+            gie_input: Dict[str, Any] = {
+                "prompt": submit_payload["prompt"],
+                # KIE requires this field and only accepts a limited set of values.
+                # Use the documented safe option, then crop the final output to 3:4 on retrieval.
+                "aspect_ratio": "3:2",
+                "quality": raw_quality,
+            }
+            if model_name == "gpt-image/1.5-image-to-image":
+                gie_input["input_urls"] = [prepared_product_kie_url, prepared_logo_kie_url]
+
+            gie_payload: Dict[str, Any] = {
+                "model": model_name,
+                **({"callBackUrl": submit_payload.get("callBackUrl")} if submit_payload.get("callBackUrl") else {}),
+                "input": gie_input,
+            }
+            res = await client.create_task(gie_payload)
+            return gie_payload, res
+
+        # KIE market model: Wan 2.7 Image (edit/generate).
+        if model_name in {"wan/2-7-image", "wan/2-7-image-pro"}:
+            requested_resolution = str(submit_payload.get("resolution") or "1K").strip()
+            # For multi-image inputs, provide an empty bbox list per image.
+            bbox_list: list[list[list[int]]] = [[] for _ in range(2)]
+            wan_payload: Dict[str, Any] = {
+                "model": model_name,
+                **({"callBackUrl": submit_payload.get("callBackUrl")} if submit_payload.get("callBackUrl") else {}),
+                "input": {
+                    "prompt": submit_payload["prompt"],
+                    "input_urls": [prepared_product_kie_url, prepared_logo_kie_url],
+                    "n": int(submit_payload.get("numImages") or 1),
+                    "enable_sequential": False,
+                    "resolution": _upstream_resolution_for(requested_resolution),
+                    "thinking_mode": False,
+                    "watermark": False,
+                    "seed": 0,
+                    "bbox_list": bbox_list,
+                },
+            }
+            res = await client.create_task(wan_payload)
+            return wan_payload, res
+
         kie_payload = {
-            "model": (submit_payload.get("model") or "nano-banana-2"),
+            "model": (submit_payload.get("model") or "wan/2-7-image-pro"),
             **({"callBackUrl": submit_payload.get("callBackUrl")} if submit_payload.get("callBackUrl") else {}),
+            # Some KIE jobs/createTask variants expect these at the top level.
+            "prompt": submit_payload["prompt"],
+            "filesUrl": [prepared_product_kie_url, prepared_logo_kie_url],
             "input": {
                 "prompt": submit_payload["prompt"],
                 # KIE payload formats differ by model/version; send both keys for maximum compatibility.
                 "image_input": [prepared_product_kie_url, prepared_logo_kie_url],
                 "image_urls": [prepared_product_kie_url, prepared_logo_kie_url],
-                "aspect_ratio": submit_payload.get("image_size") or "4:3",
-                "image_size": submit_payload.get("image_size") or "4:3",
-                "resolution": submit_payload.get("resolution") or "1K",
+                "filesUrl": [prepared_product_kie_url, prepared_logo_kie_url],
+                "aspect_ratio": submit_payload.get("image_size") or "3:4",
+                "image_size": submit_payload.get("image_size") or "3:4",
+                "resolution": _upstream_resolution_for(str(submit_payload.get("resolution") or "1K")),
                 "output_format": submit_payload.get("output_format") or "png",
                 "google_search": False,
             },
@@ -904,9 +1156,19 @@ async def generate(
         job.updated_at = time.time()
         job.provider = str(job_payload.get("provider") or job.provider or "kie_jobs")
         try:
+            model_name = str(job_payload.get("model") or "").strip()
+            product_source_url = str(job_payload["productImageUrl"])
+            if model_name in {"wan/2-7-image", "wan/2-7-image-pro"}:
+                product_source_url = await _transform_input_image_to_upload_url(
+                    product_source_url,
+                    server_base=server_base,
+                    target_aspect="3:4",
+                    max_height=720,
+                )
+
             product_kie_url, logo_kie_url = await asyncio.gather(
                 _resolve_kie_asset_url(
-                    job_payload["productImageUrl"],
+                    product_source_url,
                     server_base=server_base,
                     prepared_url=job_payload.get("productKieUrl") or "",
                 ),
@@ -923,6 +1185,11 @@ async def generate(
             job.error = "" if tid else f"Missing taskId in response: {res}"
             job.request_payload = {"request": kie_payload, "response": res}
             job.updated_at = time.time()
+            if tid:
+                _task_transform_store[tid] = {
+                    "target_aspect": "3:4",
+                    "max_height": 720,
+                }
         except Exception as e:
             job.state = "failed"
             job.error = str(e)
@@ -933,9 +1200,11 @@ async def generate(
         "productImageUrl": product_image_url,
         "logoUrl": logo_url,
         "callBackUrl": call_back_url,
-        "image_size": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
-        "resolution": resolution or "1K",
+        "image_size": "3:4",
+        "resolution": "720p",
         "output_format": (payload.get("output_format") or payload.get("outputFormat") or "png"),
+        "speed_mode": speed_mode,
+        "quality": (payload.get("quality") or "").strip(),
         "provider": kie_provider,
         "model": kie_model,
         "size": gpt4o_size,
@@ -946,8 +1215,28 @@ async def generate(
     # If assets are already prepared, submit directly and return the real KIE task id immediately.
     can_submit_direct = bool(product_kie_url_hint and logo_kie_url_hint)
     if settings.GENERATE_ASYNC and can_submit_direct:
-        kie_payload, res = await _submit_upstream(product_kie_url_hint, logo_kie_url_hint, submit_payload)
+        server_base = _server_base_url(request)
+        product_kie_url_direct = product_kie_url_hint
+        if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:
+            product_source_url = await _transform_input_image_to_upload_url(
+                product_image_url,
+                server_base=server_base,
+                target_aspect="3:4",
+                max_height=720,
+            )
+            product_kie_url_direct = await _resolve_kie_asset_url(
+                product_source_url,
+                server_base=server_base,
+                prepared_url=product_kie_url_hint,
+            )
+
+        kie_payload, res = await _submit_upstream(product_kie_url_direct, logo_kie_url_hint, submit_payload)
         direct_task_id = _extract_task_id(res)
+        if direct_task_id:
+            _task_transform_store[direct_task_id] = {
+                "target_aspect": "3:4",
+                "max_height": 720,
+            }
         return {
             "provider": "kie",
             "kieProvider": kie_provider,
@@ -967,32 +1256,49 @@ async def generate(
         return {"provider": "kie", "kieProvider": kie_provider, "jobId": job_id, "state": "queued"}
 
     # Fallback sync mode (not recommended for strict latency).
+    server_base = _server_base_url(request)
+    product_source_url = product_image_url
+    if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:
+        product_source_url = await _transform_input_image_to_upload_url(
+            product_source_url,
+            server_base=server_base,
+            target_aspect="3:4",
+            max_height=720,
+        )
+
     product_kie_url, logo_kie_url = await asyncio.gather(
         _resolve_kie_asset_url(
-            product_image_url,
-            server_base=_server_base_url(request),
+            product_source_url,
+            server_base=server_base,
             prepared_url=product_kie_url_hint,
         ),
         _resolve_kie_asset_url(
             logo_url,
-            server_base=_server_base_url(request),
+            server_base=server_base,
             prepared_url=logo_kie_url_hint,
         ),
     )
 
     kie_payload, res = await _submit_upstream(product_kie_url, logo_kie_url, submit_payload)
 
+    sync_task_id = _extract_task_id(res)
+    if sync_task_id:
+        _task_transform_store[sync_task_id] = {
+            "target_aspect": "3:4",
+            "max_height": 720,
+        }
+
     return {
         "provider": "kie",
         "kieProvider": kie_provider,
         "request": kie_payload,
         "response": res,
-        "kieTaskId": _extract_task_id(res),
+        "kieTaskId": sync_task_id,
     }
 
 
 @app.get("/api/jobs/{job_id}")
-async def job_status(job_id: str) -> Dict[str, Any]:
+async def job_status(request: Request, job_id: str) -> Dict[str, Any]:
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1006,16 +1312,18 @@ async def job_status(job_id: str) -> Dict[str, Any]:
         "createdAt": job.created_at,
         "updatedAt": job.updated_at,
     }
+    if job.request_payload:
+        out["requestPayload"] = job.request_payload
 
     if job.kie_task_id:
         # Reuse existing task-details logic.
-        details = await task_details(job.kie_task_id, provider=job.provider)
+        details = await task_details(request, job.kie_task_id, provider=job.provider)
         out["task"] = details
     return out
 
 
 @app.get("/api/tasks/{task_id}")
-async def task_details(task_id: str, provider: str = "") -> Dict[str, Any]:
+async def task_details(request: Request, task_id: str, provider: str = "") -> Dict[str, Any]:
     cache_key = _task_details_cache_key(task_id, provider)
     now = time.time()
     with _task_details_lock:
@@ -1024,7 +1332,7 @@ async def task_details(task_id: str, provider: str = "") -> Dict[str, Any]:
             return cached.payload
         in_flight = _task_details_inflight.get(cache_key)
         if in_flight is None:
-            in_flight = asyncio.create_task(_task_details_uncached(task_id, provider))
+            in_flight = asyncio.create_task(_task_details_uncached(request, task_id, provider))
             _task_details_inflight[cache_key] = in_flight
 
     try:
@@ -1039,11 +1347,21 @@ async def task_details(task_id: str, provider: str = "") -> Dict[str, Any]:
     return payload
 
 
-async def _task_details_uncached(task_id: str, provider: str = "") -> Dict[str, Any]:
+async def _task_details_uncached(request: Request, task_id: str, provider: str = "") -> Dict[str, Any]:
     normalized_provider = _normalized_provider_name(provider)
     callback = _callback_store.get(task_id)
     callback_result = _extract_result_payload(callback)
     if callback_result is not None:
+        urls = callback_result.get("resultUrls") if isinstance(callback_result, dict) else None
+        if isinstance(urls, list) and urls:
+            t = _task_transform_store.get(task_id) or {}
+            fixed_url = await _fetch_and_fix_ratio(
+                request,
+                str(urls[0]),
+                target_aspect=str(t.get("target_aspect") or "3:4"),
+                max_height=int(t.get("max_height") or 0),
+            )
+            callback_result["resultUrls"] = [fixed_url] + [str(u) for u in urls[1:]]
         return {
             "provider": "kie",
             "kieProvider": normalized_provider,
@@ -1064,6 +1382,17 @@ async def _task_details_uncached(task_id: str, provider: str = "") -> Dict[str, 
         raise HTTPException(status_code=502, detail=f"KIE error: {e}") from e
 
     result = _extract_result_payload(res) or callback_result
+    if isinstance(result, dict):
+        urls = result.get("resultUrls")
+        if isinstance(urls, list) and urls:
+            t = _task_transform_store.get(task_id) or {}
+            fixed_url = await _fetch_and_fix_ratio(
+                request,
+                str(urls[0]),
+                target_aspect=str(t.get("target_aspect") or "3:4"),
+                max_height=int(t.get("max_height") or 0),
+            )
+            result["resultUrls"] = [fixed_url] + [str(u) for u in urls[1:]]
     return {
         "provider": "kie",
         "kieProvider": normalized_provider,

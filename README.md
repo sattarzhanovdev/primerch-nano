@@ -1,8 +1,8 @@
-# Primerch — KIE nano-banana-2 demo (FastAPI + test frontend)
+# Primerch — KIE gpt-image/1.5-image-to-image demo (FastAPI + test frontend)
 
 ## Что есть
 
-- FastAPI API (обертка над KIE `nano-banana-2`):
+- FastAPI API (обертка над KIE `gpt-image/1.5-image-to-image`):
   - `POST /api/uploads` — загрузка картинки → возвращает ссылку
   - `GET /api/products` — товары из `base.json` (фильтр по полу/поиску)
   - `POST /api/generate` — создаёт задачу в KIE `jobs/createTask`
