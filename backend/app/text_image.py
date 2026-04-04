@@ -1,11 +1,29 @@
 from __future__ import annotations
 
-import secrets
+import hashlib
 from pathlib import Path
+from threading import RLock
 
 from PIL import Image, ImageDraw, ImageFont
 
 from .storage import uploads_dir
+
+
+_TEXT_RENDER_LOCK = RLock()
+_TEXT_RENDER_CACHE: dict[str, Path] = {}
+
+
+def _text_cache_key(text: str, width: int, height: int, padding: int, font_size: int) -> str:
+    payload = "\n".join(
+        [
+            text,
+            str(width),
+            str(height),
+            str(padding),
+            str(font_size),
+        ]
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 def render_text_png(
@@ -19,6 +37,18 @@ def render_text_png(
     text = (text or "").strip()
     if not text:
         raise ValueError("text is empty")
+
+    cache_key = _text_cache_key(text, width, height, padding, font_size)
+    with _TEXT_RENDER_LOCK:
+        cached = _TEXT_RENDER_CACHE.get(cache_key)
+        if cached and cached.exists():
+            return cached
+
+    deterministic_out = uploads_dir() / f"text_{cache_key[:20]}.png"
+    with _TEXT_RENDER_LOCK:
+        if deterministic_out.exists():
+            _TEXT_RENDER_CACHE[cache_key] = deterministic_out
+            return deterministic_out
 
     # Use transparent pixels with WHITE RGB to avoid a black rectangle if some pipeline drops alpha.
     img = Image.new("RGBA", (width, height), (255, 255, 255, 0))
@@ -74,7 +104,13 @@ def render_text_png(
         b = min(img.size[1], b + padding)
         img = img.crop((l, t, r, b))
 
-    filename = f"text_{secrets.token_hex(10)}.png"
-    out = uploads_dir() / filename
-    img.save(out, format="PNG")
-    return out
+    with _TEXT_RENDER_LOCK:
+        cached = _TEXT_RENDER_CACHE.get(cache_key)
+        if cached and cached.exists():
+            return cached
+        if deterministic_out.exists():
+            _TEXT_RENDER_CACHE[cache_key] = deterministic_out
+            return deterministic_out
+        img.save(deterministic_out, format="PNG")
+        _TEXT_RENDER_CACHE[cache_key] = deterministic_out
+        return deterministic_out

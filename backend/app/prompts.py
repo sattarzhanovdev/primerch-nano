@@ -61,6 +61,15 @@ APPLICATION_HINTS: dict[str, str] = {
 }
 
 
+def _human_model_text(model_gender: str) -> str:
+    gender_map = {
+        "male": "male human model",
+        "female": "female human model",
+        "neutral": "human model",
+    }
+    return gender_map.get(model_gender, "human model")
+
+
 def _build_scene_block(scene_mode: str, model_gender: str, source_kind: str) -> str:
     if scene_mode == "product_only":
         return """
@@ -77,12 +86,7 @@ GARMENT IDENTITY LOCK (CRITICAL):
 - Do NOT swap the product for a different garment, even if it looks similar.
 """.strip()
 
-    gender_map = {
-        "male": "male fashion model",
-        "female": "female fashion model",
-        "neutral": "fashion model",
-    }
-    model_text = gender_map.get(model_gender, "fashion model")
+    model_text = _human_model_text(model_gender)
 
     extra_text_rules = ""
     if (source_kind or "").strip().lower() == "text":
@@ -94,7 +98,9 @@ GARMENT IDENTITY LOCK (CRITICAL):
 
     base = f"""
 SCENE RULES:
-- Present the product worn by a realistic {model_text}.
+- Present the product worn by a real {model_text}.
+- Show a real person clearly wearing / trying on the product.
+- Use a human model only; do NOT use a mannequin, hanger, flat lay, invisible body, or floating garment.
 - The result must look like a real commercial fashion photograph, not AI art.
 - Keep the garment itself EXACTLY consistent with the first image.
 - Do NOT redesign, replace, restyle, recolor, or “upgrade” the garment.
@@ -110,6 +116,25 @@ SCENE RULES:
     if extra_text_rules:
         return base + "\n" + extra_text_rules
     return base
+
+
+def _build_fast_scene_block(scene_mode: str, model_gender: str) -> str:
+    if scene_mode == "product_only":
+        return """
+SCENE:
+- Product-only ecommerce studio photo.
+- Do NOT add a person, model, mannequin, body, arms, or hands.
+- Keep the target area clearly visible.
+""".strip()
+
+    model_text = _human_model_text(model_gender)
+    return f"""
+SCENE:
+- Show the EXACT product worn by a real {model_text}.
+- The person must be clearly wearing / trying on the item.
+- Use a simple ecommerce pose with the placement area visible.
+- Do NOT use a mannequin, hanger, flat lay, invisible body, or floating garment.
+""".strip()
 
 
 def _build_material_block(application: str, source_kind: str) -> str:
@@ -302,9 +327,31 @@ OUTPUT REQUIREMENT:
 
     return """
 STRICT LOGO FIDELITY:
-- Do NOT modify, redraw, restyle, reinterpret, simplify, enhance, replace, or regenerate the logo.
-- Preserve the exact shape, spacing, layout, colors, proportions, edges, and all design details.
-- Use the provided logo only.
+- Treat image 2 as the exact master brand artwork.
+- Copy only the visible logo marks from image 2.
+- Preserve the exact shape, spacing, layout, colors, proportions, orientation, edges, and all design details.
+- Do NOT modify, redraw, restyle, reinterpret, simplify, enhance, replace, regenerate, vectorize, or "clean up" the logo.
+- Do NOT substitute the logo with a similar brand mark, alternate glyphs, fake letters, or an approximate symbol.
+- If the logo cannot be preserved exactly, leave the target area blank instead of inventing another logo.
+""".strip()
+
+
+def _build_no_invention_block(source_kind: str) -> str:
+    if (source_kind or "").strip().lower() == "text":
+        return """
+NO-INVENTION RULE (CRITICAL):
+- Edit only what is required to place the provided text.
+- Do NOT invent new letters, words, symbols, decorations, textures, logos, or branding.
+- If the text cannot be preserved exactly, keep the application area blank rather than inventing approximate text.
+- Do NOT add any extra elements to "improve" the result.
+""".strip()
+
+    return """
+NO-INVENTION RULE (CRITICAL):
+- Edit only what is required to place the provided logo.
+- Do NOT invent new logo parts, icons, outlines, text, textures, decorations, or alternate branding.
+- If any part of the logo cannot be preserved exactly, leave that area unchanged rather than generating a replacement.
+- Do NOT add any extra elements to "improve" the result.
 """.strip()
 
 
@@ -424,8 +471,10 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
         fidelity = _build_source_fidelity_block(inputs.source_kind, inputs.source_text)
+        no_invention = _build_no_invention_block(inputs.source_kind)
         sleeve_lock = _build_side_disambiguation_block(placement_key) if is_sleeve else ""
         focus = _build_focus_block(placement_key) if is_sleeve else ""
+        scene = _build_fast_scene_block(inputs.scene_mode, inputs.model_gender)
         garment_lock = """
 GARMENT LOCK (CRITICAL):
 - Keep the garment/product EXACTLY the same as the first image.
@@ -439,6 +488,15 @@ PLACEMENT LOCK (CRITICAL):
 - No duplicates anywhere else (no chest/back/other sleeve).
 """.strip()
 
+        logo_priority = ""
+        if (inputs.source_kind or "").strip().lower() == "logo":
+            logo_priority = """
+LOGO PRIORITY (CRITICAL):
+- Exact logo fidelity is more important than stylization.
+- Do NOT create a "better", cleaner, sharper, or alternative version of the logo.
+- Apply the logo once exactly as provided.
+""".strip()
+
         return f"""
 Use image 1 as the product reference. Use image 2 as the exact design source.
 
@@ -446,6 +504,10 @@ TASK:
 Apply the provided design as {application} {placement} on the product in image 1 ("{inputs.product_title}").
 
 {fidelity}
+
+{logo_priority}
+
+{no_invention}
 
 {garment_lock}
 
@@ -455,9 +517,9 @@ Apply the provided design as {application} {placement} on the product in image 1
 
 {placement_lock}
 
-SCENE:
+{scene}
+
 - Photorealistic ecommerce studio photo.
-- Keep the target area clearly visible.
 - Output aspect ratio: {inputs.aspect_ratio}.
 """.strip()
 
@@ -471,6 +533,7 @@ SCENE:
     material_block = _build_material_block(inputs.application, inputs.source_kind)
     negative_block = _build_negative_block(inputs.source_kind)
     fidelity_block = _build_source_fidelity_block(inputs.source_kind, inputs.source_text)
+    no_invention_block = _build_no_invention_block(inputs.source_kind)
     surface_block = _build_surface_conformity_block(inputs.source_kind)
     sleeve_exclusion_block = _build_sleeve_exclusion_block(placement_key)
     position_anchor_block = _build_position_anchor_block(placement_key)
@@ -511,6 +574,8 @@ Apply the design from the second image EXACTLY as provided as {application} {pla
 on the product in the first image ("{inputs.product_title}").
 
 {fidelity_block}
+
+{no_invention_block}
 
 STRICT EDIT SCOPE:
 - Change only what is necessary to place the provided design realistically.

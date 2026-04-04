@@ -10,6 +10,9 @@ import httpx
 from .config import settings
 
 
+_shared_http_client: httpx.AsyncClient | None = None
+
+
 def _guess_mime(filename: str) -> str:
     name = (filename or "").lower()
     if name.endswith(".png"):
@@ -21,6 +24,23 @@ def _guess_mime(filename: str) -> str:
     if name.endswith(".gif"):
         return "image/gif"
     return "application/octet-stream"
+
+
+def get_http_client() -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None:
+        _shared_http_client = httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+        )
+    return _shared_http_client
+
+
+async def close_http_client() -> None:
+    global _shared_http_client
+    if _shared_http_client is None:
+        return
+    await _shared_http_client.aclose()
+    _shared_http_client = None
 
 
 @dataclass(frozen=True)
@@ -36,51 +56,67 @@ class KieClient:
 
     async def create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.api_base.rstrip('/')}/api/v1/jobs/createTask"
-        async with httpx.AsyncClient(timeout=120) as client:
-            res = await client.post(url, json=payload, headers={**self._headers(), "Content-Type": "application/json"})
-            res.raise_for_status()
-            return res.json()
+        client = get_http_client()
+        res = await client.post(
+            url,
+            json=payload,
+            headers={**self._headers(), "Content-Type": "application/json"},
+            timeout=120,
+        )
+        res.raise_for_status()
+        return res.json()
 
     async def record_info(self, task_id: str) -> Dict[str, Any]:
         url = f"{self.api_base.rstrip('/')}/api/v1/jobs/recordInfo"
-        async with httpx.AsyncClient(timeout=30) as client:
-            res = await client.get(url, params={"taskId": task_id}, headers=self._headers())
-            res.raise_for_status()
-            return res.json()
+        client = get_http_client()
+        res = await client.get(url, params={"taskId": task_id}, headers=self._headers(), timeout=30)
+        res.raise_for_status()
+        return res.json()
 
     async def gpt4o_image_generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.api_base.rstrip('/')}/api/v1/gpt4o-image/generate"
-        async with httpx.AsyncClient(timeout=120) as client:
-            res = await client.post(url, json=payload, headers={**self._headers(), "Content-Type": "application/json"})
-            res.raise_for_status()
-            return res.json()
+        client = get_http_client()
+        res = await client.post(
+            url,
+            json=payload,
+            headers={**self._headers(), "Content-Type": "application/json"},
+            timeout=120,
+        )
+        res.raise_for_status()
+        return res.json()
 
     async def gpt4o_image_record_info(self, task_id: str) -> Dict[str, Any]:
         url = f"{self.api_base.rstrip('/')}/api/v1/gpt4o-image/record-info"
-        async with httpx.AsyncClient(timeout=30) as client:
-            res = await client.get(url, params={"taskId": task_id}, headers=self._headers())
-            res.raise_for_status()
-            return res.json()
+        client = get_http_client()
+        res = await client.get(url, params={"taskId": task_id}, headers=self._headers(), timeout=30)
+        res.raise_for_status()
+        return res.json()
 
     async def file_url_upload(self, file_url: str, *, upload_path: str = "primerch") -> Dict[str, Any]:
         url = f"{self.file_upload_base.rstrip('/')}/api/file-url-upload"
         # KIE expects `fileUrl` (downloadable URL).
         # Some deployments also accept `url`, so we send both for compatibility.
         payload = {"fileUrl": file_url, "url": file_url, "uploadPath": upload_path}
-        async with httpx.AsyncClient(timeout=120) as client:
-            res = await client.post(url, json=payload, headers={**self._headers(), "Content-Type": "application/json"})
-            res.raise_for_status()
-            return res.json()
+        client = get_http_client()
+        res = await client.post(
+            url,
+            json=payload,
+            headers={**self._headers(), "Content-Type": "application/json"},
+            timeout=120,
+        )
+        res.raise_for_status()
+        return res.json()
 
     async def file_stream_upload(self, file_path: Path, *, upload_path: str = "primerch") -> Dict[str, Any]:
         url = f"{self.file_upload_base.rstrip('/')}/api/file-stream-upload"
         mime = _guess_mime(file_path.name)
-        files = {"file": (file_path.name, file_path.read_bytes(), mime)}
         data = {"uploadPath": upload_path}
-        async with httpx.AsyncClient(timeout=120) as client:
-            res = await client.post(url, data=data, files=files, headers=self._headers())
-            res.raise_for_status()
-            return res.json()
+        client = get_http_client()
+        with file_path.open("rb") as file_obj:
+            files = {"file": (file_path.name, file_obj, mime)}
+            res = await client.post(url, data=data, files=files, headers=self._headers(), timeout=120)
+        res.raise_for_status()
+        return res.json()
 
 
 def get_client() -> KieClient:
