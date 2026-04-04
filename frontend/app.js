@@ -2,6 +2,15 @@ const state = {
   step: "gender", // gender -> products -> customize -> result
   gender: "female",
   products: [],
+  productQuery: "",
+  productSearchAbort: null,
+  productSearchTimer: null,
+  assetWarmupAbort: null,
+  assetWarmupKey: "",
+  productPreparedSource: "",
+  productPreparedKieUrl: "",
+  logoPreparedSource: "",
+  logoPreparedKieUrl: "",
   lastError: "",
   selected: null,
   selectedImageUrl: "",
@@ -15,7 +24,7 @@ const state = {
   taskFailMsg: "",
   resultUrl: "",
   jobId: "",
-  kieProvider: "kie_gpt4o_image",
+  kieProvider: "kie_jobs",
   lastTaskJson: null,
   pollTimer: null,
   tshirtView: "front", // front | back
@@ -25,6 +34,8 @@ const state = {
   imageProxyEnabled: true,
   resolution: "1K",
   configLoaded: false,
+  generateStartedAt: 0,
+  progressExpectedMs: 0,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -103,6 +114,237 @@ function isApparelLike(p) {
   return t === "apparel" || t === "tshirt";
 }
 
+function resetProductSearch() {
+  state.productQuery = "";
+  if (state.productSearchTimer) {
+    clearTimeout(state.productSearchTimer);
+    state.productSearchTimer = null;
+  }
+  if (state.productSearchAbort) {
+    state.productSearchAbort.abort();
+    state.productSearchAbort = null;
+  }
+}
+
+function resetCustomizeState() {
+  stopPolling();
+  if (state.assetWarmupAbort) {
+    state.assetWarmupAbort.abort();
+    state.assetWarmupAbort = null;
+  }
+  state.selected = null;
+  state.selectedImageUrl = "";
+  state.application = "embroidery";
+  state.placement = "";
+  state.mode = "logo";
+  state.logoUrl = "";
+  state.text = "";
+  state.taskId = "";
+  state.taskState = "";
+  state.taskFailMsg = "";
+  state.resultUrl = "";
+  state.jobId = "";
+  state.lastTaskJson = null;
+  state.sceneMode = "on_model";
+  state.assetWarmupKey = "";
+  state.productPreparedSource = "";
+  state.productPreparedKieUrl = "";
+  state.logoPreparedSource = "";
+  state.logoPreparedKieUrl = "";
+  state.generateStartedAt = 0;
+  state.progressExpectedMs = 0;
+}
+
+function resetToStart() {
+  resetCustomizeState();
+  resetProductSearch();
+  Object.assign(state, {
+    step: "gender",
+    products: [],
+    lastError: "",
+  });
+}
+
+function setPreparedAsset(kind, sourceUrl, preparedUrl) {
+  const source = String(sourceUrl || "").trim();
+  const prepared = String(preparedUrl || "").trim();
+  if (!source || !prepared) return;
+
+  if (kind === "product") {
+    state.productPreparedSource = source;
+    state.productPreparedKieUrl = prepared;
+    return;
+  }
+
+  state.logoPreparedSource = source;
+  state.logoPreparedKieUrl = prepared;
+}
+
+function preparedKieUrlFor(kind, sourceUrl) {
+  const source = String(sourceUrl || "").trim();
+  if (!source) return "";
+
+  if (kind === "product" && state.productPreparedSource === source) {
+    return String(state.productPreparedKieUrl || "").trim();
+  }
+  if (kind === "logo" && state.logoPreparedSource === source) {
+    return String(state.logoPreparedKieUrl || "").trim();
+  }
+  return "";
+}
+
+function currentLogoSource() {
+  if (state.mode !== "logo") return "";
+  return String(state.logoUrl || "").trim();
+}
+
+function expectedDurationMsFor(speedMode) {
+  return speedMode === "fast" ? 45000 : 75000;
+}
+
+function isTerminalTaskState(taskState) {
+  return ["success", "failed", "error", "fail"].includes(String(taskState || "").trim().toLowerCase());
+}
+
+function humanizeTaskState(taskState) {
+  const key = String(taskState || "").trim().toLowerCase();
+  const labels = {
+    queued: "в очереди",
+    submitting: "загрузка исходников",
+    submitted: "отправлено в модель",
+    pending: "ожидание",
+    processing: "обработка",
+    generating: "генерация",
+    running: "генерация",
+    success: "готово",
+    failed: "ошибка",
+    fail: "ошибка",
+    error: "ошибка",
+  };
+  return labels[key] || (taskState ? String(taskState) : "в процессе");
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return `${totalSeconds}с`;
+  return `${minutes}м ${String(seconds).padStart(2, "0")}с`;
+}
+
+function generationPhaseInfo() {
+  const status = String(state.taskState || "").trim().toLowerCase();
+
+  if (state.resultUrl || status === "success") {
+    return { label: "Готово", min: 1, max: 1 };
+  }
+  if (["failed", "error", "fail"].includes(status)) {
+    return { label: "Остановлено с ошибкой", min: 1, max: 1 };
+  }
+  if (!state.taskId) {
+    if (status === "submitting") return { label: "Загружаем товар и логотип", min: 0.16, max: 0.34 };
+    if (status === "submitted") return { label: "Передаём задачу в Nano Banana 2", min: 0.34, max: 0.5 };
+    return { label: "Подготавливаем задачу", min: 0.06, max: 0.18 };
+  }
+  if (status === "submitted") return { label: "Задача принята моделью", min: 0.42, max: 0.56 };
+  return { label: "Nano Banana 2 генерирует результат", min: 0.56, max: 0.95 };
+}
+
+function getGenerationProgress() {
+  const phase = generationPhaseInfo();
+  const elapsedMs = state.generateStartedAt ? Math.max(0, Date.now() - state.generateStartedAt) : 0;
+  const expectedMs = Math.max(1000, Number(state.progressExpectedMs || expectedDurationMsFor(state.speedMode)));
+
+  if (phase.max === 1) {
+    return {
+      label: phase.label,
+      progress: 1,
+      percent: 100,
+      elapsedMs,
+      remainingLabel: "0с",
+      done: true,
+      failed: isTerminalTaskState(state.taskState) && !state.resultUrl,
+    };
+  }
+
+  const normalized = Math.min(elapsedMs / expectedMs, 1);
+  const progress = phase.min + ((phase.max - phase.min) * normalized);
+  const remainingMs = expectedMs - elapsedMs;
+
+  return {
+    label: phase.label,
+    progress,
+    percent: Math.max(1, Math.min(95, Math.round(progress * 100))),
+    elapsedMs,
+    remainingLabel: remainingMs > 0 ? formatDuration(remainingMs) : "почти готово",
+    done: false,
+    failed: false,
+  };
+}
+
+function renderGenerationProgress() {
+  const progress = getGenerationProgress();
+  const fillClass = progress.failed ? "error" : progress.done ? "done" : "";
+
+  return el("div", { class: "progress-card" }, [
+    el("div", { class: "progress-meta" }, [
+      el("div", { class: "subtitle" }, [progress.label]),
+      el("span", { class: "badge" }, [`${progress.percent}%`]),
+    ]),
+    el("div", { class: "progress-track" }, [
+      el("div", {
+        class: `progress-fill ${fillClass}`.trim(),
+        style: `width:${progress.percent}%;`,
+      }),
+    ]),
+    el("div", { class: "progress-stats" }, [
+      el("span", {}, [`Прошло: ${formatDuration(progress.elapsedMs)}`]),
+      el("span", {}, [`Осталось: ${progress.remainingLabel}`]),
+    ]),
+  ]);
+}
+
+function warmupAssets({ productImageUrl = "", logoUrl = "" } = {}) {
+  const productUrl = String(productImageUrl || "").trim();
+  const logoSource = String(logoUrl || "").trim();
+  if (!productUrl || !logoSource) return;
+
+  const nextKey = JSON.stringify([productUrl, logoSource]);
+  if (nextKey === state.assetWarmupKey) return;
+
+  if (state.assetWarmupAbort) state.assetWarmupAbort.abort();
+  const controller = new AbortController();
+  state.assetWarmupAbort = controller;
+  state.assetWarmupKey = nextKey;
+
+  fetch("/api/assets/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...(productUrl ? { productImageUrl: productUrl } : {}),
+      ...(logoSource ? { logoUrl: logoSource } : {}),
+    }),
+    signal: controller.signal,
+  }).then(async (res) => {
+    const text = await res.text();
+    if (state.assetWarmupKey !== nextKey) return;
+    if (!res.ok) throw new Error(`Asset warmup failed: ${res.status} ${text}`);
+    const data = text ? JSON.parse(text) : {};
+    const prepared = data?.prepared || {};
+    if (productUrl && prepared?.productImageUrl) {
+      setPreparedAsset("product", productUrl, prepared.productImageUrl);
+    }
+    if (logoSource && prepared?.logoUrl) {
+      setPreparedAsset("logo", logoSource, prepared.logoUrl);
+    }
+  }).catch((err) => {
+    if (err && err.name === "AbortError") return;
+    console.warn("asset warmup failed", err);
+  }).finally(() => {
+    if (state.assetWarmupAbort === controller) state.assetWarmupAbort = null;
+  });
+}
+
 function renderTopbar() {
   return el("div", { class: "topbar" }, [
     el("div", {}, [
@@ -114,25 +356,7 @@ function renderTopbar() {
       el("button", {
         class: "btn small",
         onclick: () => {
-          stopPolling();
-          Object.assign(state, {
-            step: "gender",
-            products: [],
-            selected: null,
-            selectedImageUrl: "",
-            application: "embroidery",
-            placement: "",
-            mode: "logo",
-            logoUrl: "",
-            text: "",
-            taskId: "",
-            taskState: "",
-            taskFailMsg: "",
-            resultUrl: "",
-            jobId: "",
-            lastTaskJson: null,
-            sceneMode: "on_model",
-          });
+          resetToStart();
           render();
         },
       }, ["Начать заново"]),
@@ -193,44 +417,57 @@ function genderBtn(value, label) {
 
 async function loadProducts() {
   state.lastError = "";
+  state.productQuery = "";
+  await fetchProducts("");
+}
+
+async function fetchProducts(query = "") {
+  state.lastError = "";
+  if (state.productSearchAbort) state.productSearchAbort.abort();
+  const controller = new AbortController();
+  state.productSearchAbort = controller;
   const url = new URL("/api/products", window.location.origin);
   url.searchParams.set("gender", state.gender);
   url.searchParams.set("limit", "60");
+  if (query) url.searchParams.set("q", query);
 
-  const res = await fetch(url.toString());
-  const text = await res.text();
-  if (!res.ok) {
+  try {
+    const res = await fetch(url.toString(), { signal: controller.signal });
+    const text = await res.text();
+    if (controller !== state.productSearchAbort) return;
+    if (!res.ok) {
+      state.products = [];
+      state.lastError = `GET /api/products -> ${res.status} ${text}`;
+      return;
+    }
+    const data = JSON.parse(text);
+    state.products = data.items || [];
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
     state.products = [];
-    state.lastError = `GET /api/products -> ${res.status} ${text}`;
-    return;
+    state.lastError = `GET /api/products -> ${err}`;
+  } finally {
+    if (state.productSearchAbort === controller) state.productSearchAbort = null;
   }
-  const data = JSON.parse(text);
-  state.products = data.items || [];
+}
+
+function scheduleProductsSearch(query) {
+  state.productQuery = query;
+  if (state.productSearchTimer) clearTimeout(state.productSearchTimer);
+  state.productSearchTimer = setTimeout(async () => {
+    state.productSearchTimer = null;
+    await fetchProducts(query);
+    if (state.step === "products") render();
+  }, 250);
 }
 
 function renderProducts() {
   const search = el("input", {
     class: "input",
     placeholder: "Поиск (название/категория/артикул)",
-    value: "",
-    oninput: async (e) => {
-      state.lastError = "";
-      const q = e.target.value || "";
-      const url = new URL("/api/products", window.location.origin);
-      url.searchParams.set("gender", state.gender);
-      url.searchParams.set("q", q);
-      url.searchParams.set("limit", "60");
-      const res = await fetch(url.toString());
-      const text = await res.text();
-      if (!res.ok) {
-        state.products = [];
-        state.lastError = `GET /api/products?q=... -> ${res.status} ${text}`;
-        render();
-        return;
-      }
-      const data = JSON.parse(text);
-      state.products = data.items || [];
-      render();
+    value: state.productQuery,
+    oninput: (e) => {
+      scheduleProductsSearch(String(e.target.value || "").trim());
     },
   });
 
@@ -248,6 +485,7 @@ function renderProducts() {
           el("button", {
             class: "btn small",
             onclick: () => {
+              resetProductSearch();
               state.step = "gender";
               render();
             },
@@ -267,24 +505,12 @@ function productCard(p) {
   return el("div", {
     class: "card",
     onclick: () => {
-      stopPolling();
+      resetCustomizeState();
       state.selected = p;
       state.step = "customize";
       state.selectedImageUrl = (p.images && p.images[0]) || "";
-      state.application = "embroidery";
-      state.placement = "";
       state.tshirtView = "front";
-      state.mode = "logo";
-      state.logoUrl = "";
-      state.text = "";
-      state.taskId = "";
-      state.taskState = "";
-      state.taskFailMsg = "";
-      state.resultUrl = "";
-      state.jobId = "";
-      state.lastTaskJson = null;
       state.lastError = "";
-      state.sceneMode = "on_model";
       render();
     },
   }, [
@@ -315,6 +541,11 @@ function renderCustomize() {
         el("div", { style: "display:flex;gap:10px;flex-wrap:wrap;align-items:center;" }, [
           sceneModeSwitch(),
           speedModeSwitch(),
+        ]),
+        el("div", { class: "help" }, [
+          state.speedMode === "fast"
+            ? "Быстро: тот же Nano Banana 2, но с более компактной постановкой, чтобы сократить ожидание."
+            : "Качество: тот же Nano Banana 2, но с более детальной постановкой, поэтому обычно дольше.",
         ]),
         el("div", { class: "hr" }),
         el("label", { class: "subtitle" }, ["Вид нанесения"]),
@@ -483,6 +714,7 @@ function productPhotosPicker(p) {
         const data = JSON.parse(text);
         state.selectedImageUrl = data.url;
         render();
+        warmupAssets({ productImageUrl: state.selectedImageUrl, logoUrl: currentLogoSource() });
       } catch (err) {
         state.lastError = String(err);
         render();
@@ -512,6 +744,7 @@ function productPhotosPicker(p) {
       onclick: () => {
         state.selectedImageUrl = url;
         render();
+        warmupAssets({ productImageUrl: state.selectedImageUrl, logoUrl: currentLogoSource() });
       },
     }));
   }
@@ -598,6 +831,7 @@ function logoUploader() {
         state.logoUrl = data.url;
         info.textContent = `Загружено: ${state.logoUrl}`;
         warn.textContent = "";
+        warmupAssets({ productImageUrl: state.selectedImageUrl, logoUrl: state.logoUrl });
       } catch (err) {
         info.textContent = `Ошибка: ${err}`;
       }
@@ -739,11 +973,18 @@ function speedModeSwitch() {
   return el("div", { class: "seg" }, [
     el("button", {
       class: `btn ${state.speedMode === "fast" ? "success" : ""}`,
-      onclick: () => { state.speedMode = "fast"; render(); },
+      onclick: () => {
+        state.speedMode = "fast";
+        render();
+      },
     }, ["Быстро"]),
     el("button", {
       class: `btn ${state.speedMode === "quality" ? "success" : ""}`,
-      onclick: () => { state.speedMode = "quality"; render(); },
+      onclick: () => {
+        state.speedMode = "quality";
+        warmupAssets({ productImageUrl: state.selectedImageUrl, logoUrl: currentLogoSource() });
+        render();
+      },
     }, ["Качество"]),
   ]);
 }
@@ -766,12 +1007,14 @@ async function onGenerate() {
 
   stopPolling();
   state.taskId = "";
-  state.taskState = "";
+  state.taskState = "queued";
   state.taskFailMsg = "";
   state.resultUrl = "";
   state.jobId = "";
-  state.kieProvider = "kie_gpt4o_image";
+  state.kieProvider = "kie_jobs";
   state.lastTaskJson = null;
+  state.generateStartedAt = Date.now();
+  state.progressExpectedMs = expectedDurationMsFor(state.speedMode);
   state.step = "result";
   render();
 
@@ -779,17 +1022,25 @@ async function onGenerate() {
     productId: String(state.selected.id || state.selected.url || state.selected.article),
     productArticle: String(state.selected.article || ""),
     productImageUrl: state.selectedImageUrl || "",
+    provider: "kie_jobs",
+    model: "nano-banana-2",
     placement: state.placement,
     application: state.application,
     scene_mode: state.sceneMode,
     speed_mode: state.speedMode,
     model_gender: state.gender === "male" ? "male" : state.gender === "female" ? "female" : "neutral",
     numImages: 1,
-    // Backend maps to provider-supported sizes (e.g. gpt4o-image supports only 1:1, 3:2, 2:3).
+    // Backend maps the requested aspect ratio to the selected provider/model.
     image_size: "3:2",
-    resolution: state.resolution || "720p",
+    resolution: state.resolution || "1K",
   };
-  if (state.mode === "logo") body.logoUrl = state.logoUrl;
+  const preparedProductKieUrl = preparedKieUrlFor("product", body.productImageUrl);
+  if (preparedProductKieUrl) body.productKieUrl = preparedProductKieUrl;
+  if (state.mode === "logo") {
+    body.logoUrl = state.logoUrl;
+    const preparedLogoKieUrl = preparedKieUrlFor("logo", state.logoUrl);
+    if (preparedLogoKieUrl) body.logoKieUrl = preparedLogoKieUrl;
+  }
   if (state.mode === "text") body.text = state.text;
 
   try {
@@ -809,7 +1060,7 @@ async function onGenerate() {
     state.lastTaskJson = data;
 
     state.jobId = data?.jobId || "";
-    state.kieProvider = String(data?.kieProvider || data?.kie_provider || data?.kieProvider || state.kieProvider || "kie_gpt4o_image");
+    state.kieProvider = String(data?.kieProvider || data?.kie_provider || data?.kieProvider || state.kieProvider || "kie_jobs");
     const taskId = data?.kieTaskId || data?.response?.data?.taskId || data?.response?.data?.task_id || data?.response?.data?.id;
     state.taskId = taskId || "";
 
@@ -830,11 +1081,14 @@ function renderResult() {
     : state.jobId
       ? el("span", { class: "badge" }, [`Заявка: ${state.jobId.slice(0, 8)}`])
       : el("span", { class: "badge" }, ["Номер: —"]);
-  const statusBadge = state.taskState ? el("span", { class: "badge" }, [state.taskState]) : el("span", { class: "badge" }, ["в процессе"]);
+  const statusBadge = el("span", { class: "badge" }, [humanizeTaskState(state.taskState)]);
+  const progressNode = renderGenerationProgress();
 
   const resultNode = (() => {
     if (state.resultUrl) {
       return el("div", {}, [
+        progressNode,
+        el("div", { class: "hr" }),
         el("img", {
           src: imgSrc(state.resultUrl),
           alt: "result",
@@ -845,9 +1099,16 @@ function renderResult() {
       ]);
     }
     if (state.taskState === "failed" || state.taskState === "error" || state.taskState === "fail") {
-      return el("div", { class: "help" }, [`Ошибка генерации: ${state.taskFailMsg || "unknown"}`]);
+      return el("div", {}, [
+        progressNode,
+        el("div", { class: "hr" }),
+        el("div", { class: "help" }, [`Ошибка генерации: ${state.taskFailMsg || "unknown"}`]),
+      ]);
     }
-    return el("div", { class: "help" }, ["Ждем генерацию… (polling каждые 3 сек)"]);
+    return el("div", {}, [
+      progressNode,
+      el("div", { class: "help" }, ["Ждём генерацию и обновляем статус каждые 1.5 сек."]),
+    ]);
   })();
 
   const imgBox = el("div", { class: "panel" }, [
@@ -887,12 +1148,35 @@ function renderResult() {
 
 function startPolling(taskId) {
   pollOnce(taskId);
-  state.pollTimer = setInterval(() => pollOnce(taskId), 3000);
+  state.pollTimer = setInterval(() => pollOnce(taskId), 1500);
 }
 
 function stopPolling() {
   if (state.pollTimer) clearInterval(state.pollTimer);
   state.pollTimer = null;
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function extractFailureMessage(payload, record = {}) {
+  return firstNonEmpty(
+    record?.errorMessage,
+    record?.failMsg,
+    record?.failMessage,
+    record?.message,
+    record?.msg,
+    record?.error,
+    payload?.error,
+    payload?.detail,
+    payload?.message,
+    payload?.msg,
+  );
 }
 
 async function pollOnce(taskId) {
@@ -913,9 +1197,12 @@ async function pollOnce(taskId) {
     if (successFlag === 1) state.taskState = "success";
     else if (successFlag === 2 || successFlag === 3) state.taskState = "failed";
     else state.taskState = record?.state || record?.status || "generating";
-    state.taskFailMsg = record?.errorMessage || record?.failMsg || record?.failMessage || "";
+    state.taskFailMsg = extractFailureMessage(data, record);
     const urls = data?.result?.resultUrls || data?.result?.result_urls || [];
     state.resultUrl = Array.isArray(urls) && urls.length ? urls[0] : "";
+    if (state.resultUrl || ["success", "failed", "error", "fail"].includes(String(state.taskState || "").toLowerCase())) {
+      stopPolling();
+    }
     render();
   } catch (err) {
     state.lastTaskJson = { error: String(err) };
@@ -926,7 +1213,7 @@ async function pollOnce(taskId) {
 
 function startJobPolling(jobId) {
   pollJobOnce(jobId);
-  state.pollTimer = setInterval(() => pollJobOnce(jobId), 3000);
+  state.pollTimer = setInterval(() => pollJobOnce(jobId), 1500);
 }
 
 async function pollJobOnce(jobId) {
@@ -941,8 +1228,9 @@ async function pollJobOnce(jobId) {
     const data = JSON.parse(text);
     state.lastTaskJson = data;
     state.taskId = data?.kieTaskId || state.taskId;
-    state.kieProvider = String(data?.kieProvider || state.kieProvider || "kie_gpt4o_image");
-    state.taskState = data?.state || "в процессе";
+    state.kieProvider = String(data?.kieProvider || state.kieProvider || "kie_jobs");
+    state.taskState = data?.state || "queued";
+    state.taskFailMsg = extractFailureMessage(data);
     if (state.taskId && data?.task) {
       const record = data.task?.recordInfo?.data || {};
       const successFlag = record?.successFlag;
@@ -951,7 +1239,10 @@ async function pollJobOnce(jobId) {
       else state.taskState = record?.state || state.taskState;
       const urls = data.task?.result?.resultUrls || [];
       state.resultUrl = Array.isArray(urls) && urls.length ? urls[0] : "";
-      state.taskFailMsg = record?.errorMessage || record?.failMsg || "";
+      state.taskFailMsg = extractFailureMessage(data.task, record) || extractFailureMessage(data);
+    }
+    if (state.resultUrl || ["success", "failed", "error", "fail"].includes(String(state.taskState || "").toLowerCase())) {
+      stopPolling();
     }
     render();
   } catch (err) {
