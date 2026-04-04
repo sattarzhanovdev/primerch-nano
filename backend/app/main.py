@@ -1,23 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import sys
 from urllib.parse import urlparse
 
-import httpx
 from fastapi import BackgroundTasks, Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from .kie import extract_result_urls_any, extract_uploaded_file_url, get_client, parse_result_json
+from .kie import (
+    close_http_client,
+    extract_result_urls_any,
+    extract_uploaded_file_url,
+    get_client,
+    get_http_client,
+    parse_result_json,
+)
+from .image_refs import optimize_logo_reference
 from .prompts import PromptInputs, build_nanobanana_prompt
 from .config import settings
 from .kie_cache import KieUploadCache
@@ -46,17 +55,46 @@ class GenerateJob:
     created_at: float
     updated_at: float
     state: str  # queued|submitting|submitted|failed
-    provider: str = "kie_gpt4o_image"  # kie_jobs | kie_gpt4o_image
+    provider: str = "kie_jobs"  # kie_jobs | kie_gpt4o_image
     error: str = ""
     kie_task_id: str = ""
     request_payload: Optional[Dict[str, Any]] = None
 
 
+@dataclass(frozen=True)
+class TaskDetailsCacheEntry:
+    payload: Dict[str, Any]
+    created_at: float
+
+
 _jobs: Dict[str, GenerateJob] = {}
+_catalog_lock = RLock()
+_catalog_cache: "ProductCatalog | None" = None
+_kie_prepare_lock = RLock()
+_kie_prepare_inflight: Dict[str, asyncio.Task[str]] = {}
+_task_details_lock = RLock()
+_task_details_cache: Dict[str, TaskDetailsCacheEntry] = {}
+_task_details_inflight: Dict[str, asyncio.Task[Dict[str, Any]]] = {}
+_TASK_DETAILS_CACHE_TTL_SECONDS = 1.25
+_TASK_DETAILS_CACHE_MAX_ENTRIES = 400
 
 
 def _base_json_path() -> Path:
     return repo_root() / "base.json"
+
+
+@dataclass(frozen=True)
+class CatalogItem:
+    data: Dict[str, Any]
+    search_text: str
+
+
+@dataclass(frozen=True)
+class ProductCatalog:
+    mtime_ns: int
+    items: tuple[CatalogItem, ...]
+    lookup: Dict[str, Dict[str, Any]]
+
 
 def _coerce_provider(payload: Dict[str, Any]) -> str:
     """
@@ -67,12 +105,20 @@ def _coerce_provider(payload: Dict[str, Any]) -> str:
     raw = (payload.get("provider") or payload.get("kieProvider") or payload.get("kie_provider") or "").strip().lower()
     model = (payload.get("model") or payload.get("kieModel") or payload.get("kie_model") or "").strip().lower()
 
+    if raw in {"jobs", "job", "kie_jobs", "nano-banana", "nanobanana"}:
+        return "kie_jobs"
     if raw in {"gpt4o-image", "gpt4o_image", "kie_gpt4o_image"}:
         return "kie_gpt4o_image"
     if model in {"gpt4o-image", "gpt4o_image", "gpt-4o", "gpt4o", "4o-image-api", "4o_image_api"}:
         return "kie_gpt4o_image"
-    # Default to gpt4o-image as requested.
-    return "kie_gpt4o_image"
+    return "kie_jobs"
+
+
+def _provider_was_explicit(payload: Dict[str, Any]) -> bool:
+    for key in ("provider", "kieProvider", "kie_provider", "model", "kieModel", "kie_model"):
+        if str(payload.get(key) or "").strip():
+            return True
+    return False
 
 def _map_to_gpt4o_size(aspect: str) -> str:
     """
@@ -90,11 +136,248 @@ def _map_to_gpt4o_size(aspect: str) -> str:
     return "3:2"
 
 
+def _resolve_resolution(raw_resolution: str, speed_mode: str) -> str:
+    resolution = (raw_resolution or "").strip().lower()
+    allowed = {
+        "1k": "1K",
+        "2k": "2K",
+        "4k": "4K",
+    }
+    if resolution == "720p":
+        return "1K"
+    if resolution in allowed:
+        return allowed[resolution]
+
+    # KIE jobs/createTask rejects unsupported values like 720p.
+    # Keep fast mode fast via prompt simplification and asset prewarm,
+    # but send a resolution value the upstream actually accepts.
+    _ = (speed_mode or "").strip().lower()
+    return "1K"
+
+
+def _server_base_url(request: Request) -> str:
+    return build_file_url(request, "/").rstrip("/")
+
+
+def _kie_upload_cache_key(source_url: str, upload_path: str) -> str:
+    return f"{upload_path}:{source_url}"
+
+
+def _normalized_provider_name(provider: str) -> str:
+    return _coerce_provider({"provider": provider})
+
+
+def _task_details_cache_key(task_id: str, provider: str) -> str:
+    return f"{_normalized_provider_name(provider)}:{task_id}"
+
+
+def _extract_result_payload(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        result = parse_result_json(data.get("resultJson"))
+        if result is not None:
+            return result
+
+    urls = extract_result_urls_any(payload)
+    if urls:
+        return {"resultUrls": urls}
+    return None
+
+
+def _store_task_details_cache(key: str, payload: Dict[str, Any]) -> None:
+    with _task_details_lock:
+        _task_details_cache[key] = TaskDetailsCacheEntry(payload=payload, created_at=time.time())
+        if len(_task_details_cache) > _TASK_DETAILS_CACHE_MAX_ENTRIES:
+            items = sorted(
+                _task_details_cache.items(),
+                key=lambda kv: kv[1].created_at,
+                reverse=True,
+            )[:_TASK_DETAILS_CACHE_MAX_ENTRIES]
+            _task_details_cache.clear()
+            _task_details_cache.update(items)
+
+
+def _invalidate_task_details_cache(task_id: str) -> None:
+    suffix = f":{task_id}"
+    with _task_details_lock:
+        stale_keys = [key for key in _task_details_cache if key.endswith(suffix)]
+        for key in stale_keys:
+            _task_details_cache.pop(key, None)
+
+
+async def _resolve_kie_asset_url(
+    source_url: str,
+    *,
+    server_base: str,
+    upload_path: str = "primerch",
+    prepared_url: str = "",
+) -> str:
+    prepared = str(prepared_url or "").strip()
+    if prepared and is_public_http_url(prepared):
+        return prepared
+    return await prepare_kie_asset(source_url, server_base=server_base, upload_path=upload_path)
+
+
+async def _upload_to_kie(source_url: str, *, server_base: str, upload_path: str = "primerch") -> str:
+    client = get_client()
+
+    # If the URL points to our own /uploads, we can stream-upload without public exposure.
+    if source_url.startswith(server_base + "/uploads/"):
+        name = source_url.split("/uploads/", 1)[1].split("?", 1)[0]
+        local = uploads_dir() / name
+        if not local.exists():
+            raise HTTPException(status_code=400, detail=f"Upload not found on server: {name}")
+        up = await client.file_stream_upload(local, upload_path=upload_path)
+        file_url = extract_uploaded_file_url(up)
+        if not file_url:
+            raise HTTPException(status_code=502, detail=f"KIE file-stream-upload failed: {up}")
+        return str(file_url)
+
+    # Otherwise, require a public URL and use URL-upload.
+    if not is_public_http_url(source_url):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "productImageUrl/logoUrl must be a PUBLIC http(s) URL (or uploaded via /api/uploads). "
+                f"Got: {source_url}"
+            ),
+        )
+    up = await client.file_url_upload(source_url, upload_path=upload_path)
+    file_url = extract_uploaded_file_url(up)
+    if not file_url:
+        raise HTTPException(status_code=502, detail=f"KIE file-url-upload failed: {up}")
+    return str(file_url)
+
+
+async def prepare_kie_asset(source_url: str, *, server_base: str, upload_path: str = "primerch") -> str:
+    source_url = (source_url or "").strip()
+    if not source_url:
+        raise HTTPException(status_code=400, detail="source_url is required")
+
+    cache_key = _kie_upload_cache_key(source_url, upload_path)
+    if settings.KIE_UPLOAD_CACHE:
+        cached = _kie_cache.get(cache_key)
+        if cached:
+            return cached
+        legacy_cached = _kie_cache.get(source_url)
+        if legacy_cached:
+            _kie_cache.set(cache_key, legacy_cached)
+            return legacy_cached
+
+    with _kie_prepare_lock:
+        in_flight = _kie_prepare_inflight.get(cache_key)
+        if in_flight is None:
+            in_flight = asyncio.create_task(_upload_to_kie(source_url, server_base=server_base, upload_path=upload_path))
+            _kie_prepare_inflight[cache_key] = in_flight
+
+    try:
+        prepared = await in_flight
+    finally:
+        if in_flight.done():
+            with _kie_prepare_lock:
+                if _kie_prepare_inflight.get(cache_key) is in_flight:
+                    _kie_prepare_inflight.pop(cache_key, None)
+
+    if settings.KIE_UPLOAD_CACHE:
+        _kie_cache.set(cache_key, prepared)
+    return prepared
+
+
 def _load_products() -> List[Dict[str, Any]]:
     path = _base_json_path()
     if not path.exists():
         return []
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _catalog_lookup_keys(raw: Dict[str, Any], product: Dict[str, Any]) -> tuple[str, ...]:
+    keys: list[str] = []
+    for value in (
+        product.get("id"),
+        product.get("url"),
+        product.get("article"),
+        raw.get("product_url"),
+        raw.get("url"),
+        raw.get("article"),
+    ):
+        key = str(value or "").strip()
+        if key:
+            keys.append(key)
+
+    variants = raw.get("variants")
+    if isinstance(variants, list):
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            key = str(variant.get("article") or "").strip()
+            if key:
+                keys.append(key)
+
+    return tuple(dict.fromkeys(keys))
+
+
+def _build_catalog_item(raw: Dict[str, Any]) -> CatalogItem:
+    product = _normalize_product(raw)
+    gender = _infer_gender(product)
+    product_type = _infer_product_type(product)
+    data = {
+        "id": product.get("id"),
+        "title": product.get("title"),
+        "url": product.get("url"),
+        "article": product.get("article"),
+        "material": product.get("material"),
+        "price": product.get("price"),
+        "description": product.get("description"),
+        "category": product.get("category"),
+        "images": product.get("images") or [],
+        "gender": gender,
+        "type": product_type,
+    }
+    search_text = " ".join(
+        [
+            str(data.get("title") or ""),
+            str(data.get("category") or ""),
+            str(data.get("article") or ""),
+            str(data.get("url") or ""),
+        ]
+    ).lower()
+    return CatalogItem(data=data, search_text=search_text)
+
+
+def _get_product_catalog() -> ProductCatalog:
+    global _catalog_cache
+
+    path = _base_json_path()
+    if not path.exists():
+        empty = ProductCatalog(mtime_ns=0, items=(), lookup={})
+        with _catalog_lock:
+            _catalog_cache = empty
+        return empty
+
+    mtime_ns = path.stat().st_mtime_ns
+    cached = _catalog_cache
+    if cached and cached.mtime_ns == mtime_ns:
+        return cached
+
+    raw_products = _load_products()
+    items: list[CatalogItem] = []
+    lookup: dict[str, Dict[str, Any]] = {}
+
+    for raw in raw_products:
+        if not isinstance(raw, dict):
+            continue
+        item = _build_catalog_item(raw)
+        items.append(item)
+        for key in _catalog_lookup_keys(raw, item.data):
+            lookup.setdefault(key, item.data)
+
+    catalog = ProductCatalog(mtime_ns=mtime_ns, items=tuple(items), lookup=lookup)
+    with _catalog_lock:
+        _catalog_cache = catalog
+    return catalog
 
 
 def _infer_gender(product: Dict[str, Any]) -> str:
@@ -302,22 +585,9 @@ def _normalize_product(raw: Dict[str, Any]) -> Dict[str, Any]:
         "variants": variants if isinstance(variants, list) else [],
     }
 
-
-def _product_matches_id(raw: Dict[str, Any], product_id: str) -> bool:
-    product_id = (product_id or "").strip()
-    if not product_id:
-        return False
-    if raw.get("url") and str(raw.get("url")) == product_id:
-        return True
-    if raw.get("product_url") and str(raw.get("product_url")) == product_id:
-        return True
-    if raw.get("article") and str(raw.get("article")) == product_id:
-        return True
-    if raw.get("variants") and isinstance(raw.get("variants"), list):
-        for v in raw["variants"]:
-            if isinstance(v, dict) and str(v.get("article") or "") == product_id:
-                return True
-    return False
+@app.on_event("shutdown")
+async def _shutdown_clients() -> None:
+    await close_http_client()
 
 
 @app.get("/api/health")
@@ -372,28 +642,23 @@ async def image_proxy(url: str) -> Response:
         "Origin": upstream_site.rstrip("/"),
     }
 
-    client = httpx.AsyncClient(timeout=30, follow_redirects=True)
-    stream_ctx = client.stream("GET", url, headers=headers)
+    client = get_http_client()
+    stream_ctx = client.stream("GET", url, headers=headers, timeout=30, follow_redirects=True)
     try:
         upstream = await stream_ctx.__aenter__()
     except Exception as e:
         # In restricted environments (e.g. PythonAnywhere free) outbound TCP may be blocked.
         # Be defensive here: return a regular 502 instead of letting the exception bubble up.
-        await client.aclose()
         raise HTTPException(status_code=502, detail=f"upstream connect failed: {e}") from e
 
     if upstream.status_code >= 400:
         await stream_ctx.__aexit__(None, None, None)
-        await client.aclose()
         raise HTTPException(status_code=502, detail=f"upstream {upstream.status_code}")
 
     content_type = upstream.headers.get("content-type", "application/octet-stream")
 
     async def _close() -> None:
-        try:
-            await stream_ctx.__aexit__(None, None, None)
-        finally:
-            await client.aclose()
+        await stream_ctx.__aexit__(None, None, None)
 
     cache = "public, max-age=3600"
     return StreamingResponse(
@@ -433,14 +698,14 @@ async def list_products(
     q: Optional[str] = None,
     limit: int = 60,
 ) -> Dict[str, Any]:
-    products = _load_products()
+    catalog = _get_product_catalog()
     out: List[Dict[str, Any]] = []
     q_norm = (q or "").strip().lower()
     gender_norm = (gender or "").strip().lower()
 
-    for raw in products:
-        p = _normalize_product(raw)
-        p_gender = _infer_gender(p)
+    for item in catalog.items:
+        p = item.data
+        p_gender = str(p.get("gender") or "unisex")
         if gender_norm and gender_norm != "all":
             # Unisex items should be visible for both male/female selections.
             if gender_norm in {"male", "female"}:
@@ -450,25 +715,10 @@ async def list_products(
                 if p_gender != gender_norm:
                     continue
         if q_norm:
-            hay = f"{p.get('title','')} {p.get('category','')} {p.get('article','')} {p.get('url','')}".lower()
-            if q_norm not in hay:
+            if q_norm not in item.search_text:
                 continue
 
-        out.append(
-            {
-                "id": p.get("id"),
-                "title": p.get("title"),
-                "url": p.get("url"),
-                "article": p.get("article"),
-                "material": p.get("material"),
-                "price": p.get("price"),
-                "description": p.get("description"),
-                "category": p.get("category"),
-                "images": p.get("images") or [],
-                "gender": p_gender,
-                "type": _infer_product_type(p),
-            }
-        )
+        out.append(dict(p))
         if len(out) >= max(1, min(limit, 200)):
             break
     return {"items": out, "total": len(out)}
@@ -478,6 +728,31 @@ async def list_products(
 async def upload_image(request: Request, file: UploadFile = File(...)) -> Dict[str, Any]:
     filename, url = await save_upload_image(request, file)
     return {"filename": filename, "url": url, "contentType": file.content_type}
+
+
+@app.post("/api/assets/prepare")
+async def prepare_assets(request: Request, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    server_base = _server_base_url(request)
+    prepared: Dict[str, str] = {}
+    errors: Dict[str, str] = {}
+    tasks: dict[str, asyncio.Task[str]] = {}
+
+    for key in ("productImageUrl", "logoUrl"):
+        source_url = str(payload.get(key) or "").strip()
+        if source_url:
+            if key == "logoUrl":
+                source_url = optimize_logo_reference(request, source_url)
+            tasks[key] = asyncio.create_task(prepare_kie_asset(source_url, server_base=server_base))
+
+    for key, task in tasks.items():
+        try:
+            prepared[key] = await task
+        except HTTPException as e:
+            errors[key] = str(e.detail)
+        except Exception as e:
+            errors[key] = str(e)
+
+    return {"ok": not errors, "prepared": prepared, "errors": errors}
 
 
 @app.post("/api/generate")
@@ -500,14 +775,17 @@ async def generate(
     placement = (payload.get("placement") or "").strip()
     application = (payload.get("application") or "embroidery").strip()
     image_size = (payload.get("image_size") or payload.get("imageSize") or "4:3").strip()
-    resolution = (payload.get("resolution") or "720p").strip()
-    num_images = int(payload.get("numImages") or 1)
     scene_mode = (payload.get("scene_mode") or payload.get("sceneMode") or "on_model").strip()
     model_gender = (payload.get("model_gender") or payload.get("modelGender") or "neutral").strip()
     speed_mode = (payload.get("speed_mode") or payload.get("speedMode") or "quality").strip()
+    resolution = _resolve_resolution((payload.get("resolution") or "").strip(), speed_mode)
     kie_provider = _coerce_provider(payload)
-    # Default model is irrelevant for gpt4o-image provider, but keep a sane default for jobs/createTask.
-    kie_model = (payload.get("model") or payload.get("kieModel") or payload.get("kie_model") or "nano-banana-2").strip()
+    if not _provider_was_explicit(payload) and speed_mode.lower() == "fast":
+        # Fast mode should switch to the lower-latency image-editing provider by default.
+        kie_provider = "kie_gpt4o_image"
+    kie_model = (payload.get("model") or payload.get("kieModel") or payload.get("kie_model") or "").strip()
+    if not kie_model and kie_provider == "kie_jobs":
+        kie_model = "nano-banana-2"
 
     # gpt4o-image has a restricted set of sizes; align prompt + request size.
     prompt_aspect_ratio = image_size
@@ -521,18 +799,21 @@ async def generate(
     if not placement:
         raise HTTPException(status_code=400, detail="placement is required")
 
-    products = _load_products()
     lookup = product_id or product_article
-    raw_product = next((p for p in products if isinstance(p, dict) and _product_matches_id(p, lookup)), None)
-    if not raw_product:
+    catalog = _get_product_catalog()
+    product = catalog.lookup.get(lookup)
+    if not product:
         raise HTTPException(status_code=404, detail="Product not found in base.json (by productId/productArticle)")
-    product = _normalize_product(raw_product)
 
     product_image_url = (payload.get("productImageUrl") or "").strip() or _default_product_image(product)
     if not product_image_url:
         raise HTTPException(status_code=400, detail="productImageUrl missing and product has no images")
+    product_kie_url_hint = (
+        (payload.get("productKieUrl") or payload.get("product_kie_url") or "").strip()
+    )
 
     logo_url = (payload.get("logoUrl") or "").strip()
+    logo_kie_url_hint = (payload.get("logoKieUrl") or payload.get("logo_kie_url") or "").strip()
     text_value = (payload.get("text") or "").strip()
     if not logo_url and not text_value:
         raise HTTPException(status_code=400, detail="logoUrl or text is required")
@@ -541,6 +822,8 @@ async def generate(
     if not logo_url and text_value:
         path = render_text_png(text_value)
         logo_url = build_file_url(request, f"/uploads/{path.name}")
+    elif logo_url:
+        logo_url = optimize_logo_reference(request, logo_url)
 
     prompt = build_nanobanana_prompt(
         PromptInputs(
@@ -566,46 +849,6 @@ async def generate(
 
     client = get_client()
 
-    def _server_base_url() -> str:
-        return build_file_url(request, "/").rstrip("/")
-
-    async def to_kie_file_url(source_url: str, *, server_base: str, upload_path: str = "primerch") -> str:
-        if settings.KIE_UPLOAD_CACHE:
-            cached = _kie_cache.get(source_url)
-            if cached:
-                return cached
-
-        # If the URL points to our own /uploads, we can stream-upload without public exposure.
-        if source_url.startswith(server_base + "/uploads/"):
-            name = source_url.split("/uploads/", 1)[1].split("?", 1)[0]
-            local = uploads_dir() / name
-            if not local.exists():
-                raise HTTPException(status_code=400, detail=f"Upload not found on server: {name}")
-            up = await client.file_stream_upload(local, upload_path=upload_path)
-            file_url = extract_uploaded_file_url(up)
-            if not file_url:
-                raise HTTPException(status_code=502, detail=f"KIE file-stream-upload failed: {up}")
-            if settings.KIE_UPLOAD_CACHE:
-                _kie_cache.set(source_url, str(file_url))
-            return str(file_url)
-
-        # Otherwise, require a public URL and use URL-upload.
-        if not is_public_http_url(source_url):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "productImageUrl/logoUrl must be a PUBLIC http(s) URL (or uploaded via /api/uploads). "
-                    f"Got: {source_url}"
-                ),
-            )
-        up = await client.file_url_upload(source_url, upload_path=upload_path)
-        file_url = extract_uploaded_file_url(up)
-        if not file_url:
-            raise HTTPException(status_code=502, detail=f"KIE file-url-upload failed: {up}")
-        if settings.KIE_UPLOAD_CACHE:
-            _kie_cache.set(source_url, str(file_url))
-        return str(file_url)
-
     def _extract_task_id(create_task_resp: Any) -> str:
         if isinstance(create_task_resp, dict):
             # Some endpoints may return taskId at the top level.
@@ -619,45 +862,64 @@ async def generate(
                     return str(tid)
         return ""
 
+    async def _submit_upstream(
+        prepared_product_kie_url: str,
+        prepared_logo_kie_url: str,
+        submit_payload: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        if submit_payload["provider"] == "kie_gpt4o_image":
+            kie_payload = {
+                "filesUrl": [prepared_product_kie_url, prepared_logo_kie_url],
+                "prompt": submit_payload["prompt"],
+                "size": submit_payload.get("size") or _map_to_gpt4o_size(submit_payload.get("image_size") or ""),
+                **({"callBackUrl": submit_payload.get("callBackUrl")} if submit_payload.get("callBackUrl") else {}),
+                "nVariants": 1,
+                "isEnhance": False,
+                "uploadCn": False,
+                "enableFallback": False,
+            }
+            res = await client.gpt4o_image_generate(kie_payload)
+            return kie_payload, res
+
+        kie_payload = {
+            "model": (submit_payload.get("model") or "nano-banana-2"),
+            **({"callBackUrl": submit_payload.get("callBackUrl")} if submit_payload.get("callBackUrl") else {}),
+            "input": {
+                "prompt": submit_payload["prompt"],
+                # KIE payload formats differ by model/version; send both keys for maximum compatibility.
+                "image_input": [prepared_product_kie_url, prepared_logo_kie_url],
+                "image_urls": [prepared_product_kie_url, prepared_logo_kie_url],
+                "aspect_ratio": submit_payload.get("image_size") or "4:3",
+                "image_size": submit_payload.get("image_size") or "4:3",
+                "resolution": submit_payload.get("resolution") or "1K",
+                "output_format": submit_payload.get("output_format") or "png",
+                "google_search": False,
+            },
+        }
+        res = await client.create_task(kie_payload)
+        return kie_payload, res
+
     async def _submit_job(job_id: str, server_base: str, job_payload: Dict[str, Any]) -> None:
         job = _jobs.get(job_id)
         if not job:
             return
         job.state = "submitting"
         job.updated_at = time.time()
-        job.provider = str(job_payload.get("provider") or job.provider or "kie_gpt4o_image")
+        job.provider = str(job_payload.get("provider") or job.provider or "kie_jobs")
         try:
-            product_kie_url = await to_kie_file_url(job_payload["productImageUrl"], server_base=server_base)
-            logo_kie_url = await to_kie_file_url(job_payload["logoUrl"], server_base=server_base)
-
-            if job.provider == "kie_gpt4o_image":
-                kie_payload = {
-                    "filesUrl": [product_kie_url, logo_kie_url],
-                    "prompt": job_payload["prompt"],
-                    "size": job_payload.get("size") or _map_to_gpt4o_size(job_payload.get("image_size") or ""),
-                    **({"callBackUrl": job_payload.get("callBackUrl")} if job_payload.get("callBackUrl") else {}),
-                    "isEnhance": False,
-                    "uploadCn": False,
-                    "enableFallback": False,
-                    "fallbackModel": "FLUX_MAX",
-                }
-                res = await client.gpt4o_image_generate(kie_payload)
-            else:
-                kie_payload = {
-                    "model": (job_payload.get("model") or "nano-banana-2"),
-                    **({"callBackUrl": job_payload.get("callBackUrl")} if job_payload.get("callBackUrl") else {}),
-                    "input": {
-                        "prompt": job_payload["prompt"],
-                        # KIE payload formats differ by model/version; send both keys for maximum compatibility.
-                        "image_input": [product_kie_url, logo_kie_url],
-                        "image_urls": [product_kie_url, logo_kie_url],
-                        "aspect_ratio": job_payload.get("image_size") or "4:3",
-                        "image_size": job_payload.get("image_size") or "4:3",
-                        "resolution": job_payload.get("resolution") or "720p",
-                        "output_format": job_payload.get("output_format") or "png",
-                    },
-                }
-                res = await client.create_task(kie_payload)
+            product_kie_url, logo_kie_url = await asyncio.gather(
+                _resolve_kie_asset_url(
+                    job_payload["productImageUrl"],
+                    server_base=server_base,
+                    prepared_url=job_payload.get("productKieUrl") or "",
+                ),
+                _resolve_kie_asset_url(
+                    job_payload["logoUrl"],
+                    server_base=server_base,
+                    prepared_url=job_payload.get("logoKieUrl") or "",
+                ),
+            )
+            kie_payload, res = await _submit_upstream(product_kie_url, logo_kie_url, job_payload)
             tid = _extract_task_id(res)
             job.kie_task_id = tid
             job.state = "submitted" if tid else "failed"
@@ -669,60 +931,59 @@ async def generate(
             job.error = str(e)
             job.updated_at = time.time()
 
-    # Always return quickly (<=30s). Submit to upstream in background.
+    submit_payload = {
+        "prompt": prompt,
+        "productImageUrl": product_image_url,
+        "logoUrl": logo_url,
+        "callBackUrl": call_back_url,
+        "image_size": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
+        "resolution": resolution or "1K",
+        "output_format": (payload.get("output_format") or payload.get("outputFormat") or "png"),
+        "provider": kie_provider,
+        "model": kie_model,
+        "size": gpt4o_size,
+        "productKieUrl": product_kie_url_hint,
+        "logoKieUrl": logo_kie_url_hint,
+    }
+
+    # If assets are already prepared, submit directly and return the real KIE task id immediately.
+    can_submit_direct = bool(product_kie_url_hint and logo_kie_url_hint)
+    if settings.GENERATE_ASYNC and can_submit_direct:
+        kie_payload, res = await _submit_upstream(product_kie_url_hint, logo_kie_url_hint, submit_payload)
+        direct_task_id = _extract_task_id(res)
+        return {
+            "provider": "kie",
+            "kieProvider": kie_provider,
+            "request": kie_payload,
+            "response": res,
+            "kieTaskId": direct_task_id,
+            "state": "submitted" if direct_task_id else "failed",
+        }
+
+    # Default async mode: prepare assets and submit upstream in the background.
     if settings.GENERATE_ASYNC:
         job_id = uuid4().hex
         now = time.time()
         job = GenerateJob(job_id=job_id, created_at=now, updated_at=now, state="queued", provider=kie_provider)
         _jobs[job_id] = job
-
-        submit_payload = {
-            "prompt": prompt,
-            "productImageUrl": product_image_url,
-            "logoUrl": logo_url,
-            "callBackUrl": call_back_url,
-            "image_size": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
-            "resolution": resolution or "720p",
-            "output_format": (payload.get("output_format") or payload.get("outputFormat") or "png"),
-            "provider": kie_provider,
-            "model": kie_model,
-            "size": gpt4o_size,
-        }
-        background_tasks.add_task(_submit_job, job_id, _server_base_url(), submit_payload)
+        background_tasks.add_task(_submit_job, job_id, _server_base_url(request), submit_payload)
         return {"provider": "kie", "kieProvider": kie_provider, "jobId": job_id, "state": "queued"}
 
     # Fallback sync mode (not recommended for strict latency).
-    product_kie_url = await to_kie_file_url(product_image_url, server_base=_server_base_url())
-    logo_kie_url = await to_kie_file_url(logo_url, server_base=_server_base_url())
+    product_kie_url, logo_kie_url = await asyncio.gather(
+        _resolve_kie_asset_url(
+            product_image_url,
+            server_base=_server_base_url(request),
+            prepared_url=product_kie_url_hint,
+        ),
+        _resolve_kie_asset_url(
+            logo_url,
+            server_base=_server_base_url(request),
+            prepared_url=logo_kie_url_hint,
+        ),
+    )
 
-    if kie_provider == "kie_gpt4o_image":
-        kie_payload = {
-            "filesUrl": [product_kie_url, logo_kie_url],
-            "prompt": prompt,
-            "size": gpt4o_size or _map_to_gpt4o_size(image_size),
-            **({"callBackUrl": call_back_url} if call_back_url else {}),
-            "isEnhance": False,
-            "uploadCn": False,
-            "enableFallback": False,
-            "fallbackModel": "FLUX_MAX",
-        }
-        res = await client.gpt4o_image_generate(kie_payload)
-    else:
-        kie_payload = {
-            "model": kie_model or "nano-banana-2",
-            **({"callBackUrl": call_back_url} if call_back_url else {}),
-            "input": {
-                "prompt": prompt,
-                # KIE payload formats differ by model/version; send both keys for maximum compatibility.
-                "image_input": [product_kie_url, logo_kie_url],
-                "image_urls": [product_kie_url, logo_kie_url],
-                "aspect_ratio": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
-                "image_size": (payload.get("image_size") or payload.get("imageSize") or image_size or "4:3"),
-                "resolution": resolution or "720p",
-                "output_format": (payload.get("output_format") or payload.get("outputFormat") or "png"),
-            },
-        }
-        res = await client.create_task(kie_payload)
+    kie_payload, res = await _submit_upstream(product_kie_url, logo_kie_url, submit_payload)
 
     return {
         "provider": "kie",
@@ -758,9 +1019,45 @@ async def job_status(job_id: str) -> Dict[str, Any]:
 
 @app.get("/api/tasks/{task_id}")
 async def task_details(task_id: str, provider: str = "") -> Dict[str, Any]:
+    cache_key = _task_details_cache_key(task_id, provider)
+    now = time.time()
+    with _task_details_lock:
+        cached = _task_details_cache.get(cache_key)
+        if cached and now - cached.created_at <= _TASK_DETAILS_CACHE_TTL_SECONDS:
+            return cached.payload
+        in_flight = _task_details_inflight.get(cache_key)
+        if in_flight is None:
+            in_flight = asyncio.create_task(_task_details_uncached(task_id, provider))
+            _task_details_inflight[cache_key] = in_flight
+
+    try:
+        payload = await in_flight
+    finally:
+        if in_flight.done():
+            with _task_details_lock:
+                if _task_details_inflight.get(cache_key) is in_flight:
+                    _task_details_inflight.pop(cache_key, None)
+
+    _store_task_details_cache(cache_key, payload)
+    return payload
+
+
+async def _task_details_uncached(task_id: str, provider: str = "") -> Dict[str, Any]:
+    normalized_provider = _normalized_provider_name(provider)
+    callback = _callback_store.get(task_id)
+    callback_result = _extract_result_payload(callback)
+    if callback_result is not None:
+        return {
+            "provider": "kie",
+            "kieProvider": normalized_provider,
+            "recordInfo": callback,
+            "result": callback_result,
+            "callback": callback,
+        }
+
     client = get_client()
     try:
-        if (provider or "").strip().lower() in {"kie_gpt4o_image", "gpt4o-image", "gpt4o_image"}:
+        if normalized_provider == "kie_gpt4o_image":
             res = await client.gpt4o_image_record_info(task_id)
         else:
             res = await client.record_info(task_id)
@@ -769,13 +1066,14 @@ async def task_details(task_id: str, provider: str = "") -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"KIE error: {e}") from e
 
-    callback = _callback_store.get(task_id)
-    data = (res.get("data") or {}) if isinstance(res, dict) else {}
-    result = parse_result_json(data.get("resultJson"))
-    if result is None:
-        urls = extract_result_urls_any(res)
-        result = {"resultUrls": urls} if urls else None
-    return {"provider": "kie", "kieProvider": provider or "kie_jobs", "recordInfo": res, "result": result, "callback": callback}
+    result = _extract_result_payload(res) or callback_result
+    return {
+        "provider": "kie",
+        "kieProvider": normalized_provider,
+        "recordInfo": res,
+        "result": result,
+        "callback": callback,
+    }
 
 
 @app.post("/api/callback")
@@ -783,6 +1081,7 @@ async def kie_callback(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     task_id = (body.get("data") or {}).get("taskId") or body.get("taskId") or (body.get("data") or {}).get("id")
     if task_id:
         _callback_store[str(task_id)] = body
+        _invalidate_task_details_cache(str(task_id))
     return {"ok": True}
 
 
