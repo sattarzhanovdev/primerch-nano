@@ -780,9 +780,6 @@ async def generate(
     speed_mode = (payload.get("speed_mode") or payload.get("speedMode") or "quality").strip()
     resolution = _resolve_resolution((payload.get("resolution") or "").strip(), speed_mode)
     kie_provider = _coerce_provider(payload)
-    if not _provider_was_explicit(payload) and speed_mode.lower() == "fast":
-        # Fast mode should switch to the lower-latency image-editing provider by default.
-        kie_provider = "kie_gpt4o_image"
     kie_model = (payload.get("model") or payload.get("kieModel") or payload.get("kie_model") or "").strip()
     if not kie_model and kie_provider == "kie_jobs":
         kie_model = "nano-banana-2"

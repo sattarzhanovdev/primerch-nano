@@ -49,10 +49,11 @@ def _content_bbox(img: Image.Image) -> tuple[int, int, int, int] | None:
 
 def _optimized_logo_path(source: Path) -> Path:
     stat = source.stat()
+    version_tag = "logo-ref-v2"
     signature = hashlib.sha1(
-        f"{source.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8")
+        f"{version_tag}:{source.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8")
     ).hexdigest()[:20]
-    return uploads_dir() / f"logo_ref_{signature}.png"
+    return uploads_dir() / f"logo_ref_v2_{signature}.png"
 
 
 def optimize_logo_reference(request: Request, source_url: str) -> str:
@@ -74,6 +75,15 @@ def optimize_logo_reference(request: Request, source_url: str) -> str:
             right = min(img.size[0], bbox[2] + pad)
             bottom = min(img.size[1], bbox[3] + pad)
             img = img.crop((left, top, right, bottom))
+
+        # Add a generous transparent artboard so the model keeps the logo
+        # at a more believable physical size instead of inflating it.
+        margin = max(64, int(max(img.size) * 0.45))
+        canvas_side = max(img.size) + (margin * 2)
+        canvas = Image.new("RGBA", (canvas_side, canvas_side), (0, 0, 0, 0))
+        offset = ((canvas_side - img.size[0]) // 2, (canvas_side - img.size[1]) // 2)
+        canvas.paste(img, offset, img)
+        img = canvas
 
         max_dim = 1400
         if max(img.size) > max_dim:
