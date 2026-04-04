@@ -32,7 +32,7 @@ const state = {
   speedMode: "fast", // fast | quality
   externalImageProxyBase: "",
   imageProxyEnabled: true,
-  resolution: "1K",
+  resolution: "720p",
   configLoaded: false,
   generateStartedAt: 0,
   progressExpectedMs: 0,
@@ -199,17 +199,18 @@ function currentLogoSource() {
 }
 
 function expectedDurationMsFor(speedMode) {
-  return speedMode === "fast" ? 45000 : 75000;
+  return speedMode === "fast" ? 30000 : 60000;
 }
 
 function isTerminalTaskState(taskState) {
-  return ["success", "failed", "error", "fail"].includes(String(taskState || "").trim().toLowerCase());
+  return ["success", "failed", "error", "fail", "timeout"].includes(String(taskState || "").trim().toLowerCase());
 }
 
 function humanizeTaskState(taskState) {
   const key = String(taskState || "").trim().toLowerCase();
   const labels = {
     queued: "в очереди",
+    timeout: "таймаут",
     submitting: "загрузка исходников",
     submitted: "отправлено в модель",
     pending: "ожидание",
@@ -1023,7 +1024,7 @@ async function onGenerate() {
     productArticle: String(state.selected.article || ""),
     productImageUrl: state.selectedImageUrl || "",
     provider: "kie_jobs",
-    model: "nano-banana-2",
+    model: "wan/2-7-image-pro",
     placement: state.placement,
     application: state.application,
     scene_mode: state.sceneMode,
@@ -1031,7 +1032,7 @@ async function onGenerate() {
     model_gender: state.gender === "male" ? "male" : state.gender === "female" ? "female" : "neutral",
     numImages: 1,
     // Backend maps the requested aspect ratio to the selected provider/model.
-    image_size: "3:2",
+    image_size: "3:4",
     resolution: state.resolution || "1K",
   };
   const preparedProductKieUrl = preparedKieUrlFor("product", body.productImageUrl);
@@ -1200,7 +1201,14 @@ async function pollOnce(taskId) {
     state.taskFailMsg = extractFailureMessage(data, record);
     const urls = data?.result?.resultUrls || data?.result?.result_urls || [];
     state.resultUrl = Array.isArray(urls) && urls.length ? urls[0] : "";
-    if (state.resultUrl || ["success", "failed", "error", "fail"].includes(String(state.taskState || "").toLowerCase())) {
+    if (state.generateStartedAt && Date.now() - state.generateStartedAt > 30000 && !state.resultUrl && !isTerminalTaskState(state.taskState)) {
+      state.taskState = "timeout";
+      state.lastError = "Превышен лимит ожидания 30с. Генерация может продолжаться в фоне — нажми \"Обновить\" позже.";
+      stopPolling();
+      render();
+      return;
+    }
+    if (state.resultUrl || isTerminalTaskState(state.taskState)) {
       stopPolling();
     }
     render();
@@ -1239,9 +1247,16 @@ async function pollJobOnce(jobId) {
       else state.taskState = record?.state || state.taskState;
       const urls = data.task?.result?.resultUrls || [];
       state.resultUrl = Array.isArray(urls) && urls.length ? urls[0] : "";
+      if (state.generateStartedAt && Date.now() - state.generateStartedAt > 30000 && !state.resultUrl && !isTerminalTaskState(state.taskState)) {
+        state.taskState = "timeout";
+        state.lastError = "Превышен лимит ожидания 30с. Генерация может продолжаться в фоне — нажми \"Обновить\" позже.";
+        stopPolling();
+        render();
+        return;
+      }
       state.taskFailMsg = extractFailureMessage(data.task, record) || extractFailureMessage(data);
     }
-    if (state.resultUrl || ["success", "failed", "error", "fail"].includes(String(state.taskState || "").toLowerCase())) {
+    if (state.resultUrl || isTerminalTaskState(state.taskState)) {
       stopPolling();
     }
     render();

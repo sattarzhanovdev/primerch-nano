@@ -336,6 +336,25 @@ STRICT LOGO FIDELITY:
 """.strip()
 
 
+def _build_source_fidelity_block_fast(source_kind: str, source_text: str) -> str:
+    kind = (source_kind or "").strip().lower()
+    if kind == "text":
+        text = (source_text or "").strip()
+        return f"""
+TEXT FIDELITY (CRITICAL):
+- Render EXACTLY this text: {text!r}
+- Preserve spelling, casing, spacing, and order.
+- Keep it fully legible; no stylization that breaks letters.
+""".strip()
+
+    return """
+LOGO FIDELITY (CRITICAL):
+- Copy the logo from image 2 EXACTLY (shape, colors, spacing, proportions, orientation).
+- Do NOT redraw, restyle, simplify, enhance, or "clean up" the logo.
+- If exact fidelity is not possible, leave the area blank (do not invent).
+""".strip()
+
+
 def _build_no_invention_block(source_kind: str) -> str:
     if (source_kind or "").strip().lower() == "text":
         return """
@@ -506,7 +525,7 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
 
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
-        fidelity = _build_source_fidelity_block(inputs.source_kind, inputs.source_text)
+        fidelity = _build_source_fidelity_block_fast(inputs.source_kind, inputs.source_text)
         no_invention = _build_no_invention_block(inputs.source_kind)
         scale_lock = _build_scale_lock_block(placement_key, inputs.source_kind)
         sleeve_lock = _build_side_disambiguation_block(placement_key) if is_sleeve else ""
@@ -663,3 +682,41 @@ Return a photorealistic result of the same product from the first image,
 with only one intended branding change:
 the provided design applied as {application} {placement}.
 """.strip()
+
+
+def build_gpt_image_prompt(inputs: PromptInputs) -> str:
+    """
+    Compact prompt optimized for GPT Image 1.5 endpoints (strict prompt length limits).
+    """
+    placement_key = _canonicalize_placement(inputs.placement)
+    placement = PLACEMENT_HINTS.get(placement_key, placement_key)
+    application = APPLICATION_HINTS.get(inputs.application, inputs.application)
+
+    kind = (inputs.source_kind or "").strip().lower()
+    fidelity = ""
+    if kind == "text":
+        text = (inputs.source_text or "").strip()
+        fidelity = f'Text must be EXACTLY: {text!r}. Keep it readable (no distorted letters).'
+    else:
+        fidelity = (
+            "Logo must match image 2 EXACTLY (shape, colors, spacing, proportions, orientation). "
+            "Do not redraw/clean up. If exact match is not possible, leave area blank."
+        )
+
+    scene_mode = (inputs.scene_mode or "").strip().lower()
+    if scene_mode == "product_only":
+        scene = "Keep product-only (no human, no mannequin). Preserve original framing."
+    else:
+        model_text = _human_model_text(inputs.model_gender)
+        scene = f"Show the same product worn by a real {model_text} in a simple ecommerce studio photo."
+
+    aspect_ratio = (inputs.aspect_ratio or "").strip() or "3:4"
+    return (
+        f"Use image 1 as the base product. Use image 2 as the design source.\n"
+        f"TASK: Apply the design as {application} {placement} on the product in image 1 ({inputs.product_title!r}).\n"
+        f"{fidelity}\n"
+        "EDIT SCOPE: change only what is needed for the application; do not change product color, material, seams, or silhouette.\n"
+        "No duplicate placements; do not add extra logos/text.\n"
+        f"{scene}\n"
+        f"Output aspect ratio: {aspect_ratio}."
+    ).strip()
