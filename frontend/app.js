@@ -1211,7 +1211,7 @@ function renderResult() {
         progressNode,
         el("div", { class: "hr" }),
         el("img", {
-          src: imgSrc(state.resultUrl),
+          src: state.resultUrl,
           alt: "result",
           style: "width:100%;border-radius:14px;border:1px solid rgba(255,255,255,0.10);",
           referrerpolicy: "no-referrer",

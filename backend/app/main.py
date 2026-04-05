@@ -1449,3 +1449,6 @@ if _frontend_dir().exists():
 
 # Static: uploads
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir())), name="uploads")
+
+
+
