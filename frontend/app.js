@@ -78,7 +78,8 @@ function imgSrc(url) {
   // If backend proxy is disabled (e.g. PythonAnywhere outbound restrictions),
   // fall back to direct URLs so images can still render in the browser.
   if (!state.imageProxyEnabled) return u;
-  return `/api/image?url=${encodeURIComponent(u)}`;
+  return u;
+  // return `/api/image?url=${encodeURIComponent(u)}`;
 }
 
 function normalizeHexColor(value, fallback = "") {
