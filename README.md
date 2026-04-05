@@ -64,6 +64,50 @@ pa website reload --domain YOURUSERNAME.pythonanywhere.com
 
 Логи: `/var/log/YOURUSERNAME.pythonanywhere.com.error.log`, `/var/log/YOURUSERNAME.pythonanywhere.com.server.log`.
 
+## Деплой на DigitalOcean
+
+### Вариант A: App Platform (проще всего)
+
+1) Залей репозиторий в GitHub.
+
+2) DigitalOcean → **App Platform** → **Create App** → GitHub → выбери репо.
+
+3) Выбери сборку из **Dockerfile** (он в корне проекта).
+
+4) Добавь переменные окружения (App → Settings → Environment Variables):
+
+- `KIE_API_KEY=...` (обязательно)
+- `PUBLIC_BASE_URL=https://your-domain.com` (рекомендуется, если есть домен)
+- опционально: `IMAGE_PROXY_ENABLED=1`, `EXTERNAL_IMAGE_PROXY_BASE=...`
+
+5) В разделе **Domains** добавь домен — HTTPS включится автоматически.
+
+⚠️ Папка `uploads/` по умолчанию хранится на файловой системе сервиса. В App Platform она может быть непостоянной
+(загрузки могут пропасть при redeploy). Если нужна гарантированная сохранность — лучше **Droplet** + volume/бэкапы
+или подключи persistent storage.
+
+### Вариант B: Droplet (больше контроля)
+
+1) Создай Ubuntu Droplet и привяжи домен к IP (A-record).
+
+2) Установи Docker и Compose на сервере.
+
+3) На сервере:
+
+```bash
+git clone <your-repo-url> primerch
+cd primerch
+cp backend/.env.example backend/.env
+nano backend/.env
+docker compose up -d --build
+```
+
+4) Проверка:
+
+- `http://<server-ip>:8000/`
+
+Дальше поставь reverse-proxy (Nginx/Caddy) на 80/443 и проксируй на `localhost:8000` для HTTPS.
+
 ## Важно про callback
 
 KIE шлёт callback на `callBackUrl`. Локальный `localhost` обычно недоступен снаружи.
