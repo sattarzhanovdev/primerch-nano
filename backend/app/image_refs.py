@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from PIL import Image, ImageChops, ImageOps
 from fastapi import Request
 
+from .color_utils import hex_to_rgb, normalize_hex_color
 from .storage import build_file_url, uploads_dir
 
 
@@ -47,21 +48,45 @@ def _content_bbox(img: Image.Image) -> tuple[int, int, int, int] | None:
     return alpha_bbox or white_bbox
 
 
-def _optimized_logo_path(source: Path) -> Path:
+def _optimized_logo_path(source: Path, color_hex: str = "") -> Path:
     stat = source.stat()
-    version_tag = "logo-ref-v2"
+    version_tag = "logo-ref-v3"
+    normalized_color = normalize_hex_color(color_hex, "original")
     signature = hashlib.sha1(
-        f"{version_tag}:{source.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8")
+        f"{version_tag}:{source.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{normalized_color}".encode("utf-8")
     ).hexdigest()[:20]
-    return uploads_dir() / f"logo_ref_v2_{signature}.png"
+    return uploads_dir() / f"logo_ref_v3_{signature}.png"
+
+def _recolor_logo(img: Image.Image, color_hex: str) -> Image.Image:
+    rgb = hex_to_rgb(color_hex)
+    if rgb is None:
+        return img
+
+    rgba = img.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    alpha_extrema = alpha.getextrema()
+
+    if alpha_extrema and alpha_extrema != (255, 255):
+        mask = alpha
+    else:
+        grayscale = ImageOps.grayscale(rgba.convert("RGB"))
+        mask = ImageChops.invert(grayscale)
+        mask = mask.point(lambda value: 0 if value < 8 else min(255, int(value * 1.15)))
+        if alpha_extrema:
+            mask = ImageChops.lighter(mask, alpha)
+
+    colored = Image.new("RGBA", rgba.size, (*rgb, 0))
+    colored.putalpha(mask)
+    return colored
 
 
-def optimize_logo_reference(request: Request, source_url: str) -> str:
+def optimize_logo_reference(request: Request, source_url: str, color_hex: str = "") -> str:
     local = _local_upload_path_from_url(source_url)
     if local is None:
         return source_url
 
-    optimized = _optimized_logo_path(local)
+    normalized_color = normalize_hex_color(color_hex)
+    optimized = _optimized_logo_path(local, normalized_color)
     if optimized.exists():
         return build_file_url(request, f"/uploads/{optimized.name}")
 
@@ -75,6 +100,9 @@ def optimize_logo_reference(request: Request, source_url: str) -> str:
             right = min(img.size[0], bbox[2] + pad)
             bottom = min(img.size[1], bbox[3] + pad)
             img = img.crop((left, top, right, bottom))
+
+        if normalized_color:
+            img = _recolor_logo(img, normalized_color)
 
         # Add a generous transparent artboard so the model keeps the logo
         # at a more believable physical size instead of inflating it.

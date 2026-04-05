@@ -6,12 +6,13 @@ from threading import RLock
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .color_utils import hex_to_rgb, normalize_hex_color
 from .storage import uploads_dir
 
 
 _TEXT_RENDER_LOCK = RLock()
 _TEXT_RENDER_CACHE: dict[str, Path] = {}
-_TEXT_RENDER_VERSION = "v3"
+_TEXT_RENDER_VERSION = "v4"
 _FONT_CANDIDATES = (
     "DejaVuSans-Bold.ttf",
     "DejaVuSans.ttf",
@@ -24,6 +25,7 @@ _FONT_CANDIDATES = (
 
 def _text_cache_key(
     text: str,
+    fill_color: str,
     width: int,
     height: int,
     padding: int,
@@ -35,6 +37,7 @@ def _text_cache_key(
         [
             _TEXT_RENDER_VERSION,
             text,
+            fill_color,
             str(width),
             str(height),
             str(padding),
@@ -58,6 +61,7 @@ def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 def render_text_png(
     text: str,
     *,
+    fill_color: str = "#000000",
     width: int = 1200,
     height: int = 700,
     padding: int = 16,
@@ -69,7 +73,21 @@ def render_text_png(
     if not text:
         raise ValueError("text is empty")
 
-    cache_key = _text_cache_key(text, width, height, padding, font_size, min_width, min_height)
+    normalized_fill = normalize_hex_color(fill_color, "#000000")
+    fill_rgb = hex_to_rgb(normalized_fill)
+    if fill_rgb is None:
+        fill_rgb = (0, 0, 0)
+
+    cache_key = _text_cache_key(
+        text,
+        normalized_fill,
+        width,
+        height,
+        padding,
+        font_size,
+        min_width,
+        min_height,
+    )
     with _TEXT_RENDER_LOCK:
         cached = _TEXT_RENDER_CACHE.get(cache_key)
         if cached and cached.exists():
@@ -113,7 +131,7 @@ def render_text_png(
         line_w = bbox[2] - bbox[0]
         line_h = bbox[3] - bbox[1]
         x = (width - line_w) // 2
-        draw.text((x, y), line, font=font, fill=(0, 0, 0, 255))
+        draw.text((x, y), line, font=font, fill=(*fill_rgb, 255))
         y += line_h + 24
 
     # Crop tightly to avoid the model hallucinating a "big rectangle patch".

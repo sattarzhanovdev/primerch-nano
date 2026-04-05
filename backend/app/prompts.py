@@ -13,6 +13,7 @@ class PromptInputs:
     model_gender: str = "neutral"  # male | female | neutral
     source_kind: str = "logo"  # logo | text
     source_text: str = ""  # used when source_kind=text
+    source_color: str = ""  # used when source_kind=text and a custom color is requested
     speed_mode: str = "quality"  # quality | fast
 
 
@@ -283,9 +284,24 @@ FINAL CHECK (CRITICAL):
     return ""
 
 
-def _build_source_fidelity_block(source_kind: str, source_text: str) -> str:
+def _build_source_fidelity_block(source_kind: str, source_text: str, source_color: str = "") -> str:
     if (source_kind or "").strip().lower() == "text":
         st = (source_text or "").strip()
+        requested_color = (source_color or "").strip()
+        color_block = f"""
+COLOR & VISIBILITY:
+- Use EXACTLY this text color: {requested_color}.
+- Preserve that color faithfully in the final print/embroidery.
+- Keep the text readable while retaining the requested color.
+- Do NOT auto-convert the text to black, white, or another substitute color.
+""".strip() if requested_color else """
+COLOR & VISIBILITY:
+- The text color must clearly contrast with the garment.
+- If the garment is white or light, use black or near-black thread/ink.
+- If the garment is dark, use white or light gray thread/ink.
+- NEVER use same-color-on-same-color.
+- Ensure strong visual separation between text and fabric.
+""".strip()
 
         return f"""
 STRICT TEXT FIDELITY (CRITICAL):
@@ -306,12 +322,7 @@ TEXT RULES:
 - Do NOT merge letters into abstract forms.
 - The text must be fully legible at normal viewing distance.
 
-COLOR & VISIBILITY:
-- The text color must clearly contrast with the garment.
-- If the garment is white or light, use black or near-black thread/ink.
-- If the garment is dark, use white or light gray thread/ink.
-- NEVER use same-color-on-same-color.
-- Ensure strong visual separation between text and fabric.
+{color_block}
 
 STRICT PROHIBITIONS:
 - No broken letters
@@ -336,15 +347,17 @@ STRICT LOGO FIDELITY:
 """.strip()
 
 
-def _build_source_fidelity_block_fast(source_kind: str, source_text: str) -> str:
+def _build_source_fidelity_block_fast(source_kind: str, source_text: str, source_color: str = "") -> str:
     kind = (source_kind or "").strip().lower()
     if kind == "text":
         text = (source_text or "").strip()
+        requested_color = (source_color or "").strip()
+        color_line = f"\n- Use EXACTLY this text color: {requested_color}." if requested_color else ""
         return f"""
 TEXT FIDELITY (CRITICAL):
 - Render EXACTLY this text: {text!r}
 - Preserve spelling, casing, spacing, and order.
-- Keep it fully legible; no stylization that breaks letters.
+- Keep it fully legible; no stylization that breaks letters.{color_line}
 """.strip()
 
     return """
@@ -525,7 +538,7 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
 
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
-        fidelity = _build_source_fidelity_block_fast(inputs.source_kind, inputs.source_text)
+        fidelity = _build_source_fidelity_block_fast(inputs.source_kind, inputs.source_text, inputs.source_color)
         no_invention = _build_no_invention_block(inputs.source_kind)
         scale_lock = _build_scale_lock_block(placement_key, inputs.source_kind)
         sleeve_lock = _build_side_disambiguation_block(placement_key) if is_sleeve else ""
@@ -590,7 +603,7 @@ Apply the provided design as {application} {placement} on the product in image 1
     side_block = _build_side_disambiguation_block(placement_key)
     material_block = _build_material_block(inputs.application, inputs.source_kind)
     negative_block = _build_negative_block(inputs.source_kind)
-    fidelity_block = _build_source_fidelity_block(inputs.source_kind, inputs.source_text)
+    fidelity_block = _build_source_fidelity_block(inputs.source_kind, inputs.source_text, inputs.source_color)
     no_invention_block = _build_no_invention_block(inputs.source_kind)
     surface_block = _build_surface_conformity_block(inputs.source_kind)
     scale_lock_block = _build_scale_lock_block(placement_key, inputs.source_kind)
@@ -696,7 +709,8 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     fidelity = ""
     if kind == "text":
         text = (inputs.source_text or "").strip()
-        fidelity = f'Text must be EXACTLY: {text!r}. Keep it readable (no distorted letters).'
+        color_hint = f" Use EXACTLY this text color: {(inputs.source_color or '').strip()}." if (inputs.source_color or "").strip() else ""
+        fidelity = f"Text must be EXACTLY: {text!r}. Keep it readable (no distorted letters).{color_hint}"
     else:
         fidelity = (
             "Logo must match image 2 EXACTLY (shape, colors, spacing, proportions, orientation). "
