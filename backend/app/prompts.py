@@ -530,11 +530,33 @@ POSITION ANCHOR:
 
     return ""
 
+def _wants_full_body_framing(scene_mode: str, placement_key: str) -> bool:
+    mode = (scene_mode or "").strip().lower()
+    if mode == "product_only":
+        return False
+
+    key = (placement_key or "").strip()
+    if key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
+        return False
+    if key.startswith("mug_"):
+        return False
+    return True
+
+def _build_full_body_framing_block() -> str:
+    return """
+FULL-BODY FRAMING (CRITICAL):
+- Show the model full-length, head-to-toe (include feet/shoes).
+- Prefer a standing full-body ecommerce pose.
+- Do NOT crop out the head, hands, or feet.
+- Keep the product and the target placement area clearly visible (not tiny).
+""".strip()
+
 def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     placement_key = _canonicalize_placement(inputs.placement)
     placement = PLACEMENT_HINTS.get(placement_key, placement_key)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
     is_sleeve = placement_key in {"wearer_right_sleeve", "wearer_left_sleeve"}
+    full_body_block = _build_full_body_framing_block() if _wants_full_body_framing(inputs.scene_mode, placement_key) else ""
 
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
@@ -581,6 +603,8 @@ Apply the provided design as {application} {placement} on the product in image 1
 {scale_lock}
 
 {garment_lock}
+
+{full_body_block}
 
 {focus}
 
@@ -665,6 +689,8 @@ STRICT EDIT SCOPE:
 
 {scene_block}
 
+{full_body_block}
+
 {focus_block}
 
 {side_block}
@@ -722,7 +748,13 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
         scene = "Keep product-only (no human, no mannequin). Preserve original framing."
     else:
         model_text = _human_model_text(inputs.model_gender)
-        scene = f"Show the same product worn by a real {model_text} in a simple ecommerce studio photo."
+        if _wants_full_body_framing(scene_mode, placement_key):
+            scene = (
+                f"Show the same product worn by a real {model_text} in a simple ecommerce studio photo "
+                "(full-body head-to-toe, include feet; do not crop the person)."
+            )
+        else:
+            scene = f"Show the same product worn by a real {model_text} in a simple ecommerce studio photo."
 
     aspect_ratio = (inputs.aspect_ratio or "").strip() or "3:4"
     return (
