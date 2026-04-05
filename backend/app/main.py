@@ -615,9 +615,9 @@ def _product_prompt_title(product: Dict[str, Any]) -> str:
     title = str(product.get("title") or "").strip()
     hay = title.lower()
     if "худи" in hay or "hoodie" in hay:
-        return "white hoodie"
+        return "hoodie"
     if "свитшот" in hay or "sweatshirt" in hay:
-        return "white sweatshirt"
+        return "sweatshirt"
     if "толстовк" in hay:
         return "zip hoodie"
     if "поло" in hay:
@@ -625,7 +625,7 @@ def _product_prompt_title(product: Dict[str, Any]) -> str:
     if "рубашк" in hay:
         return "shirt"
     if "футболк" in hay or "t-shirt" in hay or "tshirt" in hay:
-        return "white t-shirt"
+        return "t-shirt"
     if "кружк" in hay or "mug" in hay:
         return "ceramic mug"
     if "бейсболк" in hay or "кепк" in hay:
@@ -654,6 +654,15 @@ def _default_product_image(product: Dict[str, Any]) -> Optional[str]:
     if isinstance(images, list) and images:
         return images[0]
     return None
+
+
+def _is_sleeve_placement(placement: str) -> bool:
+    return (placement or "").strip() in {
+        "right_sleeve",
+        "left_sleeve",
+        "wearer_right_sleeve",
+        "wearer_left_sleeve",
+    }
 
 
 def _breadcrumbs_to_category(breadcrumbs: Any) -> str:
@@ -1022,7 +1031,20 @@ async def generate(
 
     source_kind = "logo" if logo_url else "text"
     if not logo_url and text_value:
-        path = render_text_png(text_value, fill_color=text_color)
+        render_kwargs: Dict[str, Any] = {
+            "fill_color": text_color,
+        }
+        if _is_sleeve_placement(placement):
+            render_kwargs.update({
+                "width": 1600,
+                "height": 420,
+                "padding": 20,
+                "font_size": 150,
+                "min_width": 720,
+                "min_height": 280,
+                "layout": "sleeve_wordmark",
+            })
+        path = render_text_png(text_value, **render_kwargs)
         logo_url = build_file_url(request, f"/uploads/{path.name}")
     elif logo_url:
         logo_url = optimize_logo_reference(request, logo_url, color_hex=logo_color)
@@ -1036,7 +1058,7 @@ async def generate(
         model_gender=model_gender,
         source_kind=source_kind,
         source_text=text_value if source_kind == "text" else "",
-        source_color=text_color if source_kind == "text" else "",
+        source_color=text_color if source_kind == "text" else logo_color,
         speed_mode=speed_mode,
     )
     if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:
@@ -1449,6 +1471,3 @@ if _frontend_dir().exists():
 
 # Static: uploads
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir())), name="uploads")
-
-
-
