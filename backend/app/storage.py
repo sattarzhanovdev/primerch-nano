@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from pathlib import Path
 from typing import Final, Tuple
+from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request, UploadFile
 
@@ -54,9 +55,29 @@ def _safe_ext(filename: str, content_type: str) -> str:
 
 
 def _public_base_url(request: Request) -> str:
-    if settings.PUBLIC_BASE_URL.strip():
-        return settings.PUBLIC_BASE_URL.rstrip("/")
-    return str(request.base_url).rstrip("/")
+    explicit = settings.PUBLIC_BASE_URL.strip().rstrip("/")
+    request_base = str(request.base_url).rstrip("/")
+    if not explicit:
+        return request_base
+
+    # If we are behind a proxy/https and the request already carries the correct
+    # public origin (via Host + X-Forwarded-Proto), prefer it to avoid mixed-content
+    # issues when PUBLIC_BASE_URL is stale (e.g., still pointing to an http:// IP).
+    try:
+        parsed_req = urlparse(request_base)
+        parsed_explicit = urlparse(explicit)
+    except Exception:
+        return explicit
+
+    req_host = (parsed_req.hostname or "").strip().lower()
+    if parsed_req.scheme == "https" and req_host and req_host not in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        explicit_host = (parsed_explicit.hostname or "").strip().lower()
+        if parsed_explicit.scheme != "https":
+            return request_base
+        if explicit_host and explicit_host != req_host:
+            return request_base
+
+    return explicit
 
 
 def build_file_url(request: Request, relative_path: str) -> str:
