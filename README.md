@@ -50,10 +50,11 @@ KIE_API_KEY=YOUR_TOKEN
 DEBUG_ROUTES=0
 ```
 
-4) Создай сайт (подставь свой username):
+4) Создай сайт (подставь свой username).
+Важно: внутри `--command` не используйте `~` — укажите абсолютные пути `/home/YOURUSERNAME/...`:
 
 ```bash
-pa website create --domain YOURUSERNAME.pythonanywhere.com --command '~/.virtualenvs/primerch/bin/uvicorn --env-file ~/primerch/backend/.env --app-dir ~/primerch/backend --uds ${DOMAIN_SOCKET} app.main:app'
+pa website create --domain YOURUSERNAME.pythonanywhere.com --command '/home/YOURUSERNAME/.virtualenvs/primerch/bin/python -m uvicorn --env-file /home/YOURUSERNAME/primerch/backend/.env --app-dir /home/YOURUSERNAME/primerch/backend --uds ${DOMAIN_SOCKET} app.main:app'
 ```
 
 5) После изменений в коде:
