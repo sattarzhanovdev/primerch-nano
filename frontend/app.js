@@ -285,11 +285,11 @@ function generationPhaseInfo() {
   }
   if (!state.taskId) {
     if (status === "submitting") return { label: "Загружаем товар и логотип", min: 0.16, max: 0.34 };
-    if (status === "submitted") return { label: "Передаём задачу в Nano Banana 2", min: 0.34, max: 0.5 };
+    if (status === "submitted") return { label: "Передаём задачу", min: 0.34, max: 0.5 };
     return { label: "Подготавливаем задачу", min: 0.06, max: 0.18 };
   }
   if (status === "submitted") return { label: "Задача принята моделью", min: 0.42, max: 0.56 };
-  return { label: "Nano Banana 2 генерирует результат", min: 0.56, max: 0.95 };
+  return { label: "Генерирую результат", min: 0.56, max: 0.95 };
 }
 
 function getGenerationProgress() {
@@ -597,8 +597,8 @@ function renderCustomize() {
         ]),
         el("div", { class: "help" }, [
           state.speedMode === "fast"
-            ? "Быстро: тот же Nano Banana 2, но с более компактной постановкой, чтобы сократить ожидание."
-            : "Качество: тот же Nano Banana 2, но с более детальной постановкой, поэтому обычно дольше.",
+            ? "Быстро: с более компактной постановкой, чтобы сократить ожидание."
+            : "Качество: с более детальной постановкой, поэтому обычно дольше.",
         ]),
         el("div", { class: "hr" }),
         el("label", { class: "subtitle" }, ["Вид нанесения"]),
