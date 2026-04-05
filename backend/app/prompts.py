@@ -709,9 +709,12 @@ POSITION ANCHOR:
 
     return ""
 
-def _wants_full_body_framing(scene_mode: str, placement_key: str) -> bool:
+def _wants_full_body_framing(scene_mode: str, product_title: str, placement_key: str) -> bool:
     mode = (scene_mode or "").strip().lower()
     if mode == "product_only":
+        return False
+
+    if _is_headwear_product(product_title):
         return False
 
     key = (placement_key or "").strip()
@@ -730,12 +733,35 @@ FULL-BODY FRAMING (CRITICAL):
 - Keep the product and the target placement area clearly visible (not tiny).
 """.strip()
 
+def _build_compact_framing_hint(product_title: str, placement_key: str) -> str:
+    key = (placement_key or "").strip()
+    if _is_headwear_product(product_title):
+        return " Framing: upper-body crop; keep the headwear fully visible (do not crop the top)."
+    if key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
+        return " Framing: keep the target sleeve prominent and clearly visible."
+    if key.startswith("mug_"):
+        return ""
+    return " Framing: full-body head-to-toe; include feet/shoes; do not crop the person."
+
+
+def _build_compact_viewpoint_hint(placement_key: str) -> str:
+    key = (placement_key or "").strip()
+    if key in {"right_sleeve", "wearer_right_sleeve"}:
+        return " Camera: clear right-side 3/4 view; wearer's RIGHT sleeve closest to camera."
+    if key in {"left_sleeve", "wearer_left_sleeve"}:
+        return " Camera: clear left-side 3/4 view; wearer's LEFT sleeve closest to camera."
+    if key == "left_side":
+        return " Camera: clear left-side view; left side panel most visible."
+    if key == "right_side":
+        return " Camera: clear right-side view; right side panel most visible."
+    return ""
+
 def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     placement_key = _canonicalize_placement(inputs.placement)
     placement = PLACEMENT_HINTS.get(placement_key, placement_key)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
     is_sleeve = placement_key in {"wearer_right_sleeve", "wearer_left_sleeve"}
-    full_body_block = _build_full_body_framing_block() if _wants_full_body_framing(inputs.scene_mode, placement_key) else ""
+    full_body_block = _build_full_body_framing_block() if _wants_full_body_framing(inputs.scene_mode, inputs.product_title, placement_key) else ""
 
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
@@ -944,21 +970,17 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
         scene = "Keep product-only (no human, no mannequin)."
     else:
         model_text = _human_model_text(inputs.model_gender)
-        if _wants_full_body_framing(scene_mode, placement_key):
-            scene = (
-                f"Show the same product worn by a real {model_text} in a simple ecommerce studio photo "
-                "(full-body head-to-toe, include feet; do not crop the person)."
-            )
-        else:
-            scene = f"Show the same product worn by a real {model_text} in a simple ecommerce studio photo."
+        scene = f"Show the same product worn by a real {model_text} in a simple ecommerce studio photo."
 
     aspect_ratio = (inputs.aspect_ratio or "").strip() or "3:4"
+    framing_hint = _build_compact_framing_hint(inputs.product_title, placement_key)
+    viewpoint = _build_compact_viewpoint_hint(placement_key)
     return (
         f"Use image 1 as the base product. Use image 2 as the design source.\n"
         f"TASK: Apply the design as {application} {placement} on the product in image 1 ({inputs.product_title!r}).\n"
         f"{fidelity}\n"
         "EDIT SCOPE: change only what is needed for the application; do not change product color, material, seams, or silhouette.\n"
         "No duplicate placements; do not add extra logos/text.\n"
-        f"{scene}{viewpoint}\n"
+        f"{scene}{framing_hint}{viewpoint}\n"
         f"Output aspect ratio: {aspect_ratio}."
     ).strip()
