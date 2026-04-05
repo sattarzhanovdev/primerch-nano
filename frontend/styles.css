@@ -208,6 +208,42 @@ input[type="file"].input {
   cursor: pointer;
 }
 
+.color-control {
+  display: grid;
+  gap: 8px;
+}
+
+.color-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.color-picker {
+  width: 52px;
+  height: 38px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--line-hi);
+  background: var(--raised);
+  cursor: pointer;
+}
+
+.color-picker::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.color-picker::-webkit-color-swatch {
+  border: none;
+  border-radius: 6px;
+}
+
+.color-picker::-moz-color-swatch {
+  border: none;
+  border-radius: 6px;
+}
+
 /* ─── Help text ───────────────────────────────────────── */
 .help {
   font-size: 12px;
