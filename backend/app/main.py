@@ -22,6 +22,7 @@ from starlette.background import BackgroundTask
 
 from PIL import Image
 
+from .color_utils import normalize_hex_color
 from .kie import (
     close_http_client,
     extract_result_urls_any,
@@ -924,12 +925,15 @@ async def prepare_assets(request: Request, payload: Dict[str, Any] = Body(...)) 
     prepared: Dict[str, str] = {}
     errors: Dict[str, str] = {}
     tasks: dict[str, asyncio.Task[str]] = {}
+    logo_color = normalize_hex_color(
+        (payload.get("logoColor") or payload.get("designColor") or "").strip()
+    )
 
     for key in ("productImageUrl", "logoUrl"):
         source_url = str(payload.get(key) or "").strip()
         if source_url:
             if key == "logoUrl":
-                source_url = optimize_logo_reference(request, source_url)
+                source_url = optimize_logo_reference(request, source_url, color_hex=logo_color)
             tasks[key] = asyncio.create_task(prepare_kie_asset(source_url, server_base=server_base))
 
     for key, task in tasks.items():
@@ -1006,15 +1010,22 @@ async def generate(
     logo_url = (payload.get("logoUrl") or "").strip()
     logo_kie_url_hint = (payload.get("logoKieUrl") or payload.get("logo_kie_url") or "").strip()
     text_value = (payload.get("text") or "").strip()
+    logo_color = normalize_hex_color(
+        (payload.get("logoColor") or payload.get("designColor") or "").strip()
+    )
+    text_color = normalize_hex_color(
+        (payload.get("textColor") or payload.get("designColor") or "").strip(),
+        "#000000",
+    )
     if not logo_url and not text_value:
         raise HTTPException(status_code=400, detail="logoUrl or text is required")
 
     source_kind = "logo" if logo_url else "text"
     if not logo_url and text_value:
-        path = render_text_png(text_value)
+        path = render_text_png(text_value, fill_color=text_color)
         logo_url = build_file_url(request, f"/uploads/{path.name}")
     elif logo_url:
-        logo_url = optimize_logo_reference(request, logo_url)
+        logo_url = optimize_logo_reference(request, logo_url, color_hex=logo_color)
 
     prompt_inputs = PromptInputs(
         product_title=_product_prompt_title(product),
@@ -1025,6 +1036,7 @@ async def generate(
         model_gender=model_gender,
         source_kind=source_kind,
         source_text=text_value if source_kind == "text" else "",
+        source_color=text_color if source_kind == "text" else "",
         speed_mode=speed_mode,
     )
     if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:
