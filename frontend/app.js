@@ -1,3 +1,6 @@
+const DEFAULT_TEXT_COLOR = "#111111";
+const DEFAULT_CUSTOM_LOGO_COLOR = "#111111";
+
 const state = {
   step: "gender", // gender -> products -> customize -> result
   gender: "female",
@@ -18,7 +21,10 @@ const state = {
   placement: "",
   mode: "logo", // logo | text
   logoUrl: "",
+  logoColorMode: "original", // original | custom
+  logoColor: DEFAULT_CUSTOM_LOGO_COLOR,
   text: "",
+  textColor: DEFAULT_TEXT_COLOR,
   taskId: "",
   taskState: "",
   taskFailMsg: "",
@@ -73,6 +79,19 @@ function imgSrc(url) {
   // fall back to direct URLs so images can still render in the browser.
   if (!state.imageProxyEnabled) return u;
   return `/api/image?url=${encodeURIComponent(u)}`;
+}
+
+function normalizeHexColor(value, fallback = "") {
+  let raw = String(value || "").trim();
+  if (!raw) return fallback;
+  if (!raw.startsWith("#")) raw = `#${raw}`;
+
+  const shortMatch = raw.match(/^#([0-9a-f]{3})$/i);
+  if (shortMatch) {
+    raw = `#${shortMatch[1].split("").map((ch) => ch + ch).join("")}`;
+  }
+
+  return /^#([0-9a-f]{6})$/i.test(raw) ? raw.toLowerCase() : fallback;
 }
 
 function render() {
@@ -138,7 +157,10 @@ function resetCustomizeState() {
   state.placement = "";
   state.mode = "logo";
   state.logoUrl = "";
+  state.logoColorMode = "original";
+  state.logoColor = DEFAULT_CUSTOM_LOGO_COLOR;
   state.text = "";
+  state.textColor = DEFAULT_TEXT_COLOR;
   state.taskId = "";
   state.taskState = "";
   state.taskFailMsg = "";
@@ -196,6 +218,24 @@ function preparedKieUrlFor(kind, sourceUrl) {
 function currentLogoSource() {
   if (state.mode !== "logo") return "";
   return String(state.logoUrl || "").trim();
+}
+
+function currentLogoColor() {
+  if (state.mode !== "logo" || state.logoColorMode !== "custom") return "";
+  return normalizeHexColor(state.logoColor, DEFAULT_CUSTOM_LOGO_COLOR);
+}
+
+function currentTextColor() {
+  return normalizeHexColor(state.textColor, DEFAULT_TEXT_COLOR);
+}
+
+function currentLogoSourceKey() {
+  const logoUrl = currentLogoSource();
+  if (!logoUrl) return "";
+  return JSON.stringify({
+    logoUrl,
+    color: currentLogoColor() || "original",
+  });
 }
 
 function expectedDurationMsFor(speedMode) {
@@ -305,12 +345,13 @@ function renderGenerationProgress() {
   ]);
 }
 
-function warmupAssets({ productImageUrl = "", logoUrl = "" } = {}) {
+function warmupAssets({ productImageUrl = "", logoUrl = "", logoColor = "", logoSourceKey = "" } = {}) {
   const productUrl = String(productImageUrl || "").trim();
   const logoSource = String(logoUrl || "").trim();
+  const normalizedLogoColor = normalizeHexColor(logoColor, "");
   if (!productUrl || !logoSource) return;
 
-  const nextKey = JSON.stringify([productUrl, logoSource]);
+  const nextKey = JSON.stringify([productUrl, logoSource, normalizedLogoColor]);
   if (nextKey === state.assetWarmupKey) return;
 
   if (state.assetWarmupAbort) state.assetWarmupAbort.abort();
@@ -324,6 +365,7 @@ function warmupAssets({ productImageUrl = "", logoUrl = "" } = {}) {
     body: JSON.stringify({
       ...(productUrl ? { productImageUrl: productUrl } : {}),
       ...(logoSource ? { logoUrl: logoSource } : {}),
+      ...(normalizedLogoColor ? { logoColor: normalizedLogoColor } : {}),
     }),
     signal: controller.signal,
   }).then(async (res) => {
@@ -336,13 +378,22 @@ function warmupAssets({ productImageUrl = "", logoUrl = "" } = {}) {
       setPreparedAsset("product", productUrl, prepared.productImageUrl);
     }
     if (logoSource && prepared?.logoUrl) {
-      setPreparedAsset("logo", logoSource, prepared.logoUrl);
+      setPreparedAsset("logo", logoSourceKey || logoSource, prepared.logoUrl);
     }
   }).catch((err) => {
     if (err && err.name === "AbortError") return;
     console.warn("asset warmup failed", err);
   }).finally(() => {
     if (state.assetWarmupAbort === controller) state.assetWarmupAbort = null;
+  });
+}
+
+function warmupCurrentAssets() {
+  warmupAssets({
+    productImageUrl: state.selectedImageUrl,
+    logoUrl: currentLogoSource(),
+    logoColor: currentLogoColor(),
+    logoSourceKey: currentLogoSourceKey(),
   });
 }
 
@@ -715,7 +766,7 @@ function productPhotosPicker(p) {
         const data = JSON.parse(text);
         state.selectedImageUrl = data.url;
         render();
-        warmupAssets({ productImageUrl: state.selectedImageUrl, logoUrl: currentLogoSource() });
+        warmupCurrentAssets();
       } catch (err) {
         state.lastError = String(err);
         render();
@@ -745,7 +796,7 @@ function productPhotosPicker(p) {
       onclick: () => {
         state.selectedImageUrl = url;
         render();
-        warmupAssets({ productImageUrl: state.selectedImageUrl, logoUrl: currentLogoSource() });
+        warmupCurrentAssets();
       },
     }));
   }
@@ -832,7 +883,7 @@ function logoUploader() {
         state.logoUrl = data.url;
         info.textContent = `Загружено: ${state.logoUrl}`;
         warn.textContent = "";
-        warmupAssets({ productImageUrl: state.selectedImageUrl, logoUrl: state.logoUrl });
+        warmupCurrentAssets();
       } catch (err) {
         info.textContent = `Ошибка: ${err}`;
       }
@@ -841,6 +892,41 @@ function logoUploader() {
   wrap.appendChild(input);
   wrap.appendChild(info);
   wrap.appendChild(warn);
+  wrap.appendChild(el("div", { class: "hr" }));
+  wrap.appendChild(el("label", { class: "field-label" }, ["Цвет логотипа"]));
+  wrap.appendChild(el("div", { class: "seg" }, [
+    el("button", {
+      class: `btn small ${state.logoColorMode === "original" ? "success" : ""}`,
+      onclick: () => {
+        state.logoColorMode = "original";
+        render();
+        warmupCurrentAssets();
+      },
+    }, ["Оригинал"]),
+    el("button", {
+      class: `btn small ${state.logoColorMode === "custom" ? "success" : ""}`,
+      onclick: () => {
+        state.logoColorMode = "custom";
+        render();
+        warmupCurrentAssets();
+      },
+    }, ["Свой цвет"]),
+  ]));
+
+  if (state.logoColorMode === "custom") {
+    wrap.appendChild(colorPickerControl({
+      label: "Новый цвет",
+      value: state.logoColor,
+      help: "Лучше всего работает для одноцветных логотипов и PNG/WebP с прозрачным фоном.",
+      onchange: (nextColor) => {
+        state.logoColor = nextColor;
+        render();
+        warmupCurrentAssets();
+      },
+    }));
+  } else {
+    wrap.appendChild(el("div", { class: "help" }, ["Сейчас сохраняется исходный цвет логотипа."]));
+  }
   return wrap;
 }
 
@@ -855,6 +941,35 @@ function textInput() {
       },
     }),
     el("div", { class: "help" }, ["Введите слово или короткую фразу."]),
+    el("div", { class: "hr" }),
+    colorPickerControl({
+      label: "Цвет текста",
+      value: state.textColor,
+      help: "Этот цвет будет использован при подготовке текста для нанесения.",
+      onchange: (nextColor) => {
+        state.textColor = nextColor;
+        render();
+      },
+    }),
+  ]);
+}
+
+function colorPickerControl({ label, value, help = "", onchange }) {
+  const normalized = normalizeHexColor(value, DEFAULT_TEXT_COLOR);
+  return el("div", { class: "color-control" }, [
+    el("label", { class: "field-label" }, [label]),
+    el("div", { class: "color-picker-row" }, [
+      el("input", {
+        class: "color-picker",
+        type: "color",
+        value: normalized,
+        onchange: (e) => {
+          onchange(normalizeHexColor(e.target.value, normalized));
+        },
+      }),
+      el("span", { class: "badge" }, [normalized.toUpperCase()]),
+    ]),
+    help ? el("div", { class: "help" }, [help]) : el("div", { style: "height:0px;" }),
   ]);
 }
 
@@ -983,7 +1098,7 @@ function speedModeSwitch() {
       class: `btn ${state.speedMode === "quality" ? "success" : ""}`,
       onclick: () => {
         state.speedMode = "quality";
-        warmupAssets({ productImageUrl: state.selectedImageUrl, logoUrl: currentLogoSource() });
+        warmupCurrentAssets();
         render();
       },
     }, ["Качество"]),
@@ -1039,10 +1154,15 @@ async function onGenerate() {
   if (preparedProductKieUrl) body.productKieUrl = preparedProductKieUrl;
   if (state.mode === "logo") {
     body.logoUrl = state.logoUrl;
-    const preparedLogoKieUrl = preparedKieUrlFor("logo", state.logoUrl);
+    const logoColor = currentLogoColor();
+    if (logoColor) body.logoColor = logoColor;
+    const preparedLogoKieUrl = preparedKieUrlFor("logo", currentLogoSourceKey());
     if (preparedLogoKieUrl) body.logoKieUrl = preparedLogoKieUrl;
   }
-  if (state.mode === "text") body.text = state.text;
+  if (state.mode === "text") {
+    body.text = state.text;
+    body.textColor = currentTextColor();
+  }
 
   try {
     const res = await fetch("/api/generate", {
