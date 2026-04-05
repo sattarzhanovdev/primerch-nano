@@ -12,7 +12,7 @@ from .storage import uploads_dir
 
 _TEXT_RENDER_LOCK = RLock()
 _TEXT_RENDER_CACHE: dict[str, Path] = {}
-_TEXT_RENDER_VERSION = "v4"
+_TEXT_RENDER_VERSION = "v6"
 _FONT_CANDIDATES = (
     "DejaVuSans-Bold.ttf",
     "DejaVuSans.ttf",
@@ -32,6 +32,7 @@ def _text_cache_key(
     font_size: int,
     min_width: int,
     min_height: int,
+    layout: str,
 ) -> str:
     payload = "\n".join(
         [
@@ -44,6 +45,7 @@ def _text_cache_key(
             str(font_size),
             str(min_width),
             str(min_height),
+            layout,
         ]
     )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
@@ -58,6 +60,46 @@ def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
+def _should_use_tracked_text(text: str) -> bool:
+    stripped = "".join(ch for ch in text.strip() if not ch.isspace())
+    return bool(stripped) and len(stripped) <= 12 and " " not in text.strip()
+
+
+def _measure_tracked_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, tracking: int) -> tuple[int, int]:
+    total_w = 0
+    max_h = 0
+    for index, ch in enumerate(text):
+        bbox = draw.textbbox((0, 0), ch, font=font)
+        ch_w = bbox[2] - bbox[0]
+        ch_h = bbox[3] - bbox[1]
+        total_w += ch_w
+        if index < len(text) - 1:
+            total_w += tracking
+        max_h = max(max_h, ch_h)
+    return total_w, max_h
+
+
+def _draw_tracked_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int, int],
+    canvas_width: int,
+    y: int,
+    tracking: int,
+) -> int:
+    line_w, line_h = _measure_tracked_text(draw, text, font, tracking)
+    x = (canvas_width - line_w) // 2
+    cursor_x = x
+    for ch in text:
+        draw.text((cursor_x, y), ch, font=font, fill=fill)
+        bbox = draw.textbbox((0, 0), ch, font=font)
+        ch_w = bbox[2] - bbox[0]
+        cursor_x += ch_w + tracking
+    return line_h
+
+
 def render_text_png(
     text: str,
     *,
@@ -68,6 +110,7 @@ def render_text_png(
     font_size: int = 140,
     min_width: int = 240,
     min_height: int = 240,
+    layout: str = "default",
 ) -> Path:
     text = (text or "").strip()
     if not text:
@@ -87,6 +130,7 @@ def render_text_png(
         font_size,
         min_width,
         min_height,
+        layout,
     )
     with _TEXT_RENDER_LOCK:
         cached = _TEXT_RENDER_CACHE.get(cache_key)
@@ -113,8 +157,12 @@ def render_text_png(
     current: list[str] = []
     for w in words:
         test = " ".join([*current, w])
-        bbox = draw.textbbox((0, 0), test, font=font)
-        if bbox[2] <= width - padding * 2:
+        if _should_use_tracked_text(test):
+            test_w, _ = _measure_tracked_text(draw, test, font, tracking=max(10, font_size // 14))
+        else:
+            bbox = draw.textbbox((0, 0), test, font=font)
+            test_w = bbox[2] - bbox[0]
+        if test_w <= width - padding * 2:
             current.append(w)
         else:
             if current:
@@ -127,11 +175,22 @@ def render_text_png(
 
     y = padding
     for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_w = bbox[2] - bbox[0]
-        line_h = bbox[3] - bbox[1]
-        x = (width - line_w) // 2
-        draw.text((x, y), line, font=font, fill=(*fill_rgb, 255))
+        if _should_use_tracked_text(line):
+            line_h = _draw_tracked_text(
+                draw,
+                line,
+                font=font,
+                fill=(*fill_rgb, 255),
+                canvas_width=width,
+                y=y,
+                tracking=max(10, font_size // 14),
+            )
+        else:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_w = bbox[2] - bbox[0]
+            line_h = bbox[3] - bbox[1]
+            x = (width - line_w) // 2
+            draw.text((x, y), line, font=font, fill=(*fill_rgb, 255))
         y += line_h + 24
 
     # Crop tightly to avoid the model hallucinating a "big rectangle patch".
@@ -147,9 +206,15 @@ def render_text_png(
 
     # Keep enough transparent canvas around short words so upstream image validation
     # accepts the asset and the text does not get interpreted as an oversized patch.
-    margin = max(padding * 2, int(max(img.size) * 0.4))
-    canvas_w = max(min_width, img.size[0] + margin * 2)
-    canvas_h = max(min_height, img.size[1] + margin * 2)
+    if layout == "sleeve_wordmark":
+        margin_x = max(padding * 3, int(img.size[0] * 0.18))
+        margin_y = max(padding * 2, int(img.size[1] * 0.35))
+        canvas_w = max(min_width, img.size[0] + margin_x * 2)
+        canvas_h = max(min_height, 280, img.size[1] + margin_y * 2)
+    else:
+        margin = max(padding * 2, int(max(img.size) * 0.4))
+        canvas_w = max(min_width, img.size[0] + margin * 2)
+        canvas_h = max(min_height, img.size[1] + margin * 2)
     if canvas_w != img.size[0] or canvas_h != img.size[1]:
         canvas = Image.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 0))
         offset = ((canvas_w - img.size[0]) // 2, (canvas_h - img.size[1]) // 2)

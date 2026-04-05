@@ -13,7 +13,7 @@ class PromptInputs:
     model_gender: str = "neutral"  # male | female | neutral
     source_kind: str = "logo"  # logo | text
     source_text: str = ""  # used when source_kind=text
-    source_color: str = ""  # used when source_kind=text and a custom color is requested
+    source_color: str = ""  # used when a custom text/logo color is requested
     speed_mode: str = "quality"  # quality | fast
 
 
@@ -71,13 +71,112 @@ def _human_model_text(model_gender: str) -> str:
     return gender_map.get(model_gender, "human model")
 
 
-def _build_scene_block(scene_mode: str, model_gender: str, source_kind: str) -> str:
-    if scene_mode == "product_only":
+def _is_headwear_product(product_title: str) -> bool:
+    hay = (product_title or "").strip().lower()
+    markers = (
+        "baseball cap",
+        "bucket hat",
+        "beanie",
+        "bandana",
+        "visor",
+        "headwear",
+        "cap",
+        "hat",
+        "кеп",
+        "бейсбол",
+        "панама",
+        "шапк",
+        "бандан",
+        "козыр",
+        "голов",
+    )
+    return any(marker in hay for marker in markers)
+
+
+def _build_model_framing_block(product_title: str, placement_key: str) -> str:
+    key = (placement_key or "").strip()
+
+    if _is_headwear_product(product_title):
         return """
+MODEL FRAMING:
+- For headwear products, use an upper-body crop.
+- Show the head, hat/cap/beanie, neck, and shoulders clearly.
+- Keep the full headwear item fully visible and prominent.
+- Do NOT crop the top of the head or the top of the headwear.
+- Do NOT use a full-body shot for headwear.
+""".strip()
+
+    if key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
+        return """
+MODEL FRAMING:
+- For sleeve placements, keep the target sleeve prominent in frame.
+- A tighter crop is allowed if needed to keep the sleeve placement clearly visible.
+""".strip()
+
+    return """
+MODEL FRAMING:
+- Show the model in full height, from head to feet.
+- Keep the full body silhouette visible in frame.
+- Keep the entire head fully visible, including the top of the head/hair.
+- Keep both feet / full footwear fully visible.
+- Leave a small clean margin above the head and below the feet.
+- Do NOT crop the model to only the face, bust, or upper torso.
+""".strip()
+
+
+def _build_viewpoint_block(placement_key: str) -> str:
+    key = (placement_key or "").strip()
+
+    if key in {"right_sleeve", "wearer_right_sleeve"}:
+        return """
+VIEWPOINT / CAMERA ANGLE:
+- Use a clear right-side 3/4 profile or right-side view.
+- Turn the model so the WEARER'S RIGHT sleeve is the primary visible surface.
+- Keep the wearer's right arm closest to the camera.
+- Do NOT use a straight front-facing pose.
+- Do NOT let the chest/front become the main visible surface.
+""".strip()
+
+    if key in {"left_sleeve", "wearer_left_sleeve"}:
+        return """
+VIEWPOINT / CAMERA ANGLE:
+- Use a clear left-side 3/4 profile or left-side view.
+- Turn the model so the WEARER'S LEFT sleeve is the primary visible surface.
+- Keep the wearer's left arm closest to the camera.
+- Do NOT use a straight front-facing pose.
+- Do NOT let the chest/front become the main visible surface.
+""".strip()
+
+    if key == "left_side":
+        return """
+VIEWPOINT / CAMERA ANGLE:
+- Show the product from its LEFT side.
+- Use a clear left-side profile / side-angle view.
+- The left side panel must be the primary visible surface in frame.
+- Do NOT use a front view or mostly front-facing angle.
+""".strip()
+
+    if key == "right_side":
+        return """
+VIEWPOINT / CAMERA ANGLE:
+- Show the product from its RIGHT side.
+- Use a clear right-side profile / side-angle view.
+- The right side panel must be the primary visible surface in frame.
+- Do NOT use a front view or mostly front-facing angle.
+""".strip()
+
+    return ""
+
+
+def _build_scene_block(scene_mode: str, model_gender: str, source_kind: str, product_title: str, placement_key: str) -> str:
+    viewpoint_block = _build_viewpoint_block(placement_key)
+
+    if scene_mode == "product_only":
+        base = """
 SCENE RULES:
 - Keep the first image as a product-only image.
 - Do NOT add a person, model, mannequin, arms, hands, or body.
-- Preserve the original framing, product shape, and product presentation.
+- Preserve the original product shape and product presentation.
 - Do NOT redesign the scene.
 - Keep the target placement area clearly visible.
 
@@ -86,8 +185,12 @@ GARMENT IDENTITY LOCK (CRITICAL):
 - Do NOT change garment color, fabric texture, weave, material finish, seams, stitching, buttons, collar, cuffs, hem, or silhouette.
 - Do NOT swap the product for a different garment, even if it looks similar.
 """.strip()
+        if viewpoint_block:
+            return base + "\n" + viewpoint_block
+        return base
 
     model_text = _human_model_text(model_gender)
+    framing_block = _build_model_framing_block(product_title, placement_key)
 
     extra_text_rules = ""
     if (source_kind or "").strip().lower() == "text":
@@ -114,28 +217,43 @@ SCENE RULES:
 - Preserve realistic posture, fabric drape, and clothing tension on the body.
 """.strip()
 
+    base = base + "\n" + framing_block
+    if viewpoint_block:
+        base = base + "\n" + viewpoint_block
+
     if extra_text_rules:
         return base + "\n" + extra_text_rules
     return base
 
 
-def _build_fast_scene_block(scene_mode: str, model_gender: str) -> str:
+def _build_fast_scene_block(scene_mode: str, model_gender: str, product_title: str, placement_key: str) -> str:
+    viewpoint_block = _build_viewpoint_block(placement_key)
+
     if scene_mode == "product_only":
-        return """
+        base = """
 SCENE:
 - Product-only ecommerce studio photo.
 - Do NOT add a person, model, mannequin, body, arms, or hands.
 - Keep the target area clearly visible.
 """.strip()
+        if viewpoint_block:
+            return base + "\n\n" + viewpoint_block
+        return base
 
     model_text = _human_model_text(model_gender)
-    return f"""
+    framing_block = _build_model_framing_block(product_title, placement_key)
+    base = f"""
 SCENE:
 - Show the EXACT product worn by a real {model_text}.
 - The person must be clearly wearing / trying on the item.
 - Use a simple ecommerce pose with the placement area visible.
 - Do NOT use a mannequin, hanger, flat lay, invisible body, or floating garment.
+
+{framing_block}
 """.strip()
+    if viewpoint_block:
+        return base + "\n\n" + viewpoint_block
+    return base
 
 
 def _build_material_block(application: str, source_kind: str) -> str:
@@ -226,6 +344,7 @@ FOCUS / CROPPING (SLEEVE):
 - The application must sit below the shoulder seam and above the sleeve cuff.
 - The application must NOT touch the collar/neckline.
 - Do NOT mirror, flip, or swap garment/person orientation.
+- Keep the target sleeve as the dominant visible plane, not the chest/front.
 """.strip()
 
     return """
@@ -288,6 +407,16 @@ def _build_source_fidelity_block(source_kind: str, source_text: str, source_colo
     if (source_kind or "").strip().lower() == "text":
         st = (source_text or "").strip()
         requested_color = (source_color or "").strip()
+        char_lock = ""
+        compact = "".join(ch for ch in st if not ch.isspace())
+        if compact and len(compact) <= 12:
+            quoted_chars = ", ".join(f'"{ch}"' for ch in compact)
+            char_lock = f"""
+CHARACTER LOCK (CRITICAL):
+- The text has EXACTLY {len(compact)} characters.
+- Characters in order: {quoted_chars}.
+- Do NOT omit, merge, replace, or reorder any character.
+""".strip()
         color_block = f"""
 COLOR & VISIBILITY:
 - Use EXACTLY this text color: {requested_color}.
@@ -322,6 +451,8 @@ TEXT RULES:
 - Do NOT merge letters into abstract forms.
 - The text must be fully legible at normal viewing distance.
 
+{char_lock}
+
 {color_block}
 
 STRICT PROHIBITIONS:
@@ -336,7 +467,16 @@ OUTPUT REQUIREMENT:
 - The result must look like real professional apparel branding with clean, readable typography.
 """.strip()
 
-    return """
+    requested_color = (source_color or "").strip()
+    color_block = f"""
+COLOR FIDELITY (CRITICAL):
+- Use EXACTLY this logo color: {requested_color}.
+- Preserve that color faithfully in the final application.
+- Do NOT revert the logo to its original source color.
+- Do NOT substitute a nearby shade or recolor it automatically.
+""".strip() if requested_color else ""
+
+    base = """
 STRICT LOGO FIDELITY:
 - Treat image 2 as the exact master brand artwork.
 - Copy only the visible logo marks from image 2.
@@ -345,6 +485,9 @@ STRICT LOGO FIDELITY:
 - Do NOT substitute the logo with a similar brand mark, alternate glyphs, fake letters, or an approximate symbol.
 - If the logo cannot be preserved exactly, leave the target area blank instead of inventing another logo.
 """.strip()
+    if color_block:
+        return base + "\n\n" + color_block
+    return base
 
 
 def _build_source_fidelity_block_fast(source_kind: str, source_text: str, source_color: str = "") -> str:
@@ -353,18 +496,25 @@ def _build_source_fidelity_block_fast(source_kind: str, source_text: str, source
         text = (source_text or "").strip()
         requested_color = (source_color or "").strip()
         color_line = f"\n- Use EXACTLY this text color: {requested_color}." if requested_color else ""
+        compact = "".join(ch for ch in text if not ch.isspace())
+        char_line = ""
+        if compact and len(compact) <= 12:
+            quoted_chars = ", ".join(f'"{ch}"' for ch in compact)
+            char_line = f"\n- Exact character order: {quoted_chars}. Do not omit or replace any character."
         return f"""
 TEXT FIDELITY (CRITICAL):
 - Render EXACTLY this text: {text!r}
 - Preserve spelling, casing, spacing, and order.
-- Keep it fully legible; no stylization that breaks letters.{color_line}
+- Keep it fully legible; no stylization that breaks letters.{color_line}{char_line}
 """.strip()
 
-    return """
+    requested_color = (source_color or "").strip()
+    color_line = f"\n- Keep the logo in EXACTLY this color: {requested_color}. Do NOT revert it." if requested_color else ""
+    return f"""
 LOGO FIDELITY (CRITICAL):
 - Copy the logo from image 2 EXACTLY (shape, colors, spacing, proportions, orientation).
 - Do NOT redraw, restyle, simplify, enhance, or "clean up" the logo.
-- If exact fidelity is not possible, leave the area blank (do not invent).
+- If exact fidelity is not possible, leave the area blank (do not invent).{color_line}
 """.strip()
 
 
@@ -444,6 +594,35 @@ SURFACE CONFORMITY:
 - Warp the design naturally where the material bends, exactly as it would in a real photograph.
 - Keep the design scale realistic for the product.
 """.strip()
+
+
+def _build_text_layout_block(placement_key: str, source_kind: str) -> str:
+    if (source_kind or "").strip().lower() != "text":
+        return ""
+
+    key = (placement_key or "").strip()
+    if key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
+        return """
+TEXT LAYOUT (CRITICAL):
+- Render the text as one small normal readable horizontal wordmark across the upper sleeve.
+- Keep the word upright for left-to-right reading, with the baseline roughly parallel to the ground / sleeve cuff.
+- Place it in the upper sleeve area, not along the forearm length.
+- If the word feels too long, reduce the font size instead of rotating or stacking it.
+- Do NOT rotate the text by 90 degrees.
+- Do NOT stack letters vertically.
+- Do NOT run the word vertically down the sleeve.
+- Do NOT turn the word into a vertical column.
+- Do NOT place one letter under another.
+- Keep the text compact, clean, and easy to read at a glance.
+""".strip()
+
+    return """
+TEXT LAYOUT:
+- Keep the text upright, readable, and arranged as a normal horizontal word or line.
+- Do NOT stack letters vertically.
+- Do NOT rotate the text into a vertical reading direction.
+""".strip()
+
 
 def _build_scale_lock_block(placement_key: str, source_kind: str) -> str:
     key = (placement_key or "").strip()
@@ -563,9 +742,10 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
         fidelity = _build_source_fidelity_block_fast(inputs.source_kind, inputs.source_text, inputs.source_color)
         no_invention = _build_no_invention_block(inputs.source_kind)
         scale_lock = _build_scale_lock_block(placement_key, inputs.source_kind)
+        text_layout = _build_text_layout_block(placement_key, inputs.source_kind)
         sleeve_lock = _build_side_disambiguation_block(placement_key) if is_sleeve else ""
         focus = _build_focus_block(placement_key) if is_sleeve else ""
-        scene = _build_fast_scene_block(inputs.scene_mode, inputs.model_gender)
+        scene = _build_fast_scene_block(inputs.scene_mode, inputs.model_gender, inputs.product_title, placement_key)
         garment_lock = """
 GARMENT LOCK (CRITICAL):
 - Keep the garment/product EXACTLY the same as the first image.
@@ -602,6 +782,8 @@ Apply the provided design as {application} {placement} on the product in image 1
 
 {scale_lock}
 
+{text_layout}
+
 {garment_lock}
 
 {full_body_block}
@@ -622,6 +804,8 @@ Apply the provided design as {application} {placement} on the product in image 1
         scene_mode=inputs.scene_mode,
         model_gender=inputs.model_gender,
         source_kind=inputs.source_kind,
+        product_title=inputs.product_title,
+        placement_key=placement_key,
     )
     focus_block = _build_focus_block(placement_key)
     side_block = _build_side_disambiguation_block(placement_key)
@@ -630,6 +814,7 @@ Apply the provided design as {application} {placement} on the product in image 1
     fidelity_block = _build_source_fidelity_block(inputs.source_kind, inputs.source_text, inputs.source_color)
     no_invention_block = _build_no_invention_block(inputs.source_kind)
     surface_block = _build_surface_conformity_block(inputs.source_kind)
+    text_layout_block = _build_text_layout_block(placement_key, inputs.source_kind)
     scale_lock_block = _build_scale_lock_block(placement_key, inputs.source_kind)
     sleeve_exclusion_block = _build_sleeve_exclusion_block(placement_key)
     position_anchor_block = _build_position_anchor_block(placement_key)
@@ -659,7 +844,8 @@ SLEEVE-ONLY OUTPUT (CRITICAL):
 - The chest/front torso must remain completely blank and unchanged (no design there).
 - The final photo must prioritize the target sleeve area; keep the chest mostly out of frame.
 - Do NOT “compromise” by placing the design on the chest because it is more visible.
-- Prefer a 3/4 pose where the target sleeve is closest to the camera and fully visible.
+- Prefer a clear side or 3/4 side pose where the target sleeve is closest to the camera and fully visible.
+- Straight front-facing poses are not allowed for sleeve-focused outputs.
 """.strip()
 
     return f"""
@@ -674,6 +860,8 @@ on the product in the first image ("{inputs.product_title}").
 {no_invention_block}
 
 {scale_lock_block}
+
+{text_layout_block}
 
 STRICT EDIT SCOPE:
 - Change only what is necessary to place the provided design realistically.
@@ -736,7 +924,15 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     if kind == "text":
         text = (inputs.source_text or "").strip()
         color_hint = f" Use EXACTLY this text color: {(inputs.source_color or '').strip()}." if (inputs.source_color or "").strip() else ""
-        fidelity = f"Text must be EXACTLY: {text!r}. Keep it readable (no distorted letters).{color_hint}"
+        compact = "".join(ch for ch in text if not ch.isspace())
+        char_hint = ""
+        if compact and len(compact) <= 12:
+            quoted_chars = ", ".join(f'"{ch}"' for ch in compact)
+            char_hint = f" Exact character order: {quoted_chars}. Do not omit or replace any character."
+        layout_hint = ""
+        if placement_key in {"right_sleeve", "wearer_right_sleeve", "left_sleeve", "wearer_left_sleeve"}:
+            layout_hint = " Render it as one small upright horizontal wordmark across the upper sleeve. If it does not fit, reduce size instead of rotating it. Do not stack letters vertically."
+        fidelity = f"Text must be EXACTLY: {text!r}. Keep it readable (no distorted letters).{color_hint}{char_hint}{layout_hint}"
     else:
         fidelity = (
             "Logo must match image 2 EXACTLY (shape, colors, spacing, proportions, orientation). "
@@ -745,7 +941,7 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
 
     scene_mode = (inputs.scene_mode or "").strip().lower()
     if scene_mode == "product_only":
-        scene = "Keep product-only (no human, no mannequin). Preserve original framing."
+        scene = "Keep product-only (no human, no mannequin)."
     else:
         model_text = _human_model_text(inputs.model_gender)
         if _wants_full_body_framing(scene_mode, placement_key):
@@ -763,6 +959,6 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
         f"{fidelity}\n"
         "EDIT SCOPE: change only what is needed for the application; do not change product color, material, seams, or silhouette.\n"
         "No duplicate placements; do not add extra logos/text.\n"
-        f"{scene}\n"
+        f"{scene}{viewpoint}\n"
         f"Output aspect ratio: {aspect_ratio}."
     ).strip()
