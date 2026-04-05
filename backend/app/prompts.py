@@ -92,6 +92,41 @@ def _is_headwear_product(product_title: str) -> bool:
     )
     return any(marker in hay for marker in markers)
 
+def _placement_hint_for_product(product_title: str, placement_key: str) -> str:
+    key = (placement_key or "").strip()
+    base = PLACEMENT_HINTS.get(key, key)
+
+    if _is_headwear_product(product_title):
+        if key == "front":
+            return "on the FRONT PANEL of the cap, centered on the crown ABOVE the brim"
+        if key == "back":
+            return "on the BACK PANEL of the cap, centered above the strap/closure"
+        if key == "left_side":
+            return "on the LEFT SIDE panel of the cap, centered"
+        if key == "right_side":
+            return "on the RIGHT SIDE panel of the cap, centered"
+        if key == "top":
+            return "on the TOP crown area of the cap, centered"
+    return base
+
+def _build_product_scope_lock(product_title: str) -> str:
+    if not _is_headwear_product(product_title):
+        return ""
+
+    return """
+PRODUCT SCOPE (CRITICAL):
+- The requested product is the headwear item (cap/hat) from image 1.
+- Apply the design ONLY on the headwear item itself at the requested placement.
+- Do NOT apply the design on any other clothing (t-shirt/hoodie/jacket/pants) or accessories.
+- Keep all other garments plain/blank with NO text, NO logos, and NO prints.
+- If the headwear placement is not clearly visible, adjust pose/camera so the headwear area becomes visible (do NOT move the design to the shirt).
+""".strip()
+
+def _build_compact_product_scope_hint(product_title: str) -> str:
+    if _is_headwear_product(product_title):
+        return " Product scope: cap/hat only; apply design ONLY on headwear; never move it to the shirt; keep clothing blank."
+    return ""
+
 
 def _build_model_framing_block(product_title: str, placement_key: str) -> str:
     key = (placement_key or "").strip()
@@ -770,10 +805,11 @@ def _build_compact_viewpoint_hint(placement_key: str) -> str:
 
 def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     placement_key = _canonicalize_placement(inputs.placement)
-    placement = PLACEMENT_HINTS.get(placement_key, placement_key)
+    placement = _placement_hint_for_product(inputs.product_title, placement_key)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
     is_sleeve = placement_key in {"wearer_right_sleeve", "wearer_left_sleeve"}
     full_body_block = _build_full_body_framing_block() if _wants_full_body_framing(inputs.scene_mode, inputs.product_title, placement_key) else ""
+    product_scope_lock = _build_product_scope_lock(inputs.product_title)
 
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
@@ -823,6 +859,8 @@ Apply the provided design as {application} {placement} on the product in image 1
 {text_layout}
 
 {garment_lock}
+
+{product_scope_lock}
 
 {full_body_block}
 
@@ -901,6 +939,8 @@ on the product in the first image ("{inputs.product_title}").
 
 {text_layout_block}
 
+{product_scope_lock}
+
 STRICT EDIT SCOPE:
 - Change only what is necessary to place the provided design realistically.
 - Do NOT alter the garment design beyond the application itself.
@@ -954,7 +994,7 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     Compact prompt optimized for GPT Image 1.5 endpoints (strict prompt length limits).
     """
     placement_key = _canonicalize_placement(inputs.placement)
-    placement = PLACEMENT_HINTS.get(placement_key, placement_key)
+    placement = _placement_hint_for_product(inputs.product_title, placement_key)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
 
     kind = (inputs.source_kind or "").strip().lower()
@@ -988,12 +1028,13 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     framing_hint = _build_compact_framing_hint(inputs.product_title, placement_key)
     viewpoint = _build_compact_viewpoint_hint(placement_key)
     sleeve_lock = _build_compact_sleeve_lock(placement_key)
+    product_scope = _build_compact_product_scope_hint(inputs.product_title)
     return (
         f"Use image 1 as the base product. Use image 2 as the design source.\n"
         f"TASK: Apply the design as {application} {placement} on the product in image 1 ({inputs.product_title!r}).\n"
         f"{fidelity}\n"
         "EDIT SCOPE: change only what is needed for the application; do not change product color, material, seams, or silhouette.\n"
         "No duplicate placements; do not add extra logos/text.\n"
-        f"{scene}{framing_hint}{viewpoint}{sleeve_lock}\n"
+        f"{scene}{product_scope}{framing_hint}{viewpoint}{sleeve_lock}\n"
         f"Output aspect ratio: {aspect_ratio}."
     ).strip()
