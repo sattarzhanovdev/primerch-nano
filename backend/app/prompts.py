@@ -20,10 +20,10 @@ class PromptInputs:
 PLACEMENT_HINTS: dict[str, str] = {
     # NOTE: do not prefix with "ONLY" here; we add "ONLY" explicitly in placement locks
     # to avoid "ONLY ONLY ..." ambiguity in prompts.
-    "right_sleeve": "on the wearer's right sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
-    "left_sleeve": "on the wearer's left sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
-    "wearer_right_sleeve": "on the wearer's right sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
-    "wearer_left_sleeve": "on the wearer's left sleeve panel, in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
+    "right_sleeve": "on the WEARER'S RIGHT sleeve panel (anatomical right arm), in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
+    "left_sleeve": "on the WEARER'S LEFT sleeve panel (anatomical left arm), in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
+    "wearer_right_sleeve": "on the WEARER'S RIGHT sleeve panel (anatomical right arm), in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
+    "wearer_left_sleeve": "on the WEARER'S LEFT sleeve panel (anatomical left arm), in the upper-mid sleeve area, below the shoulder seam and above the sleeve cuff",
     "chest": "on the chest area",
     "back": "on the upper back",
     "front": "on the front area",
@@ -99,24 +99,25 @@ def _build_model_framing_block(product_title: str, placement_key: str) -> str:
     if _is_headwear_product(product_title):
         return """
 MODEL FRAMING:
-- For headwear products, use an upper-body crop.
-- Show the head, hat/cap/beanie, neck, and shoulders clearly.
-- Keep the full headwear item fully visible and prominent.
+- Show the model full-length (head-to-toe) with the face clearly visible.
+- Keep the headwear fully visible and prominent.
 - Do NOT crop the top of the head or the top of the headwear.
-- Do NOT use a full-body shot for headwear.
+- Do NOT zoom out so far that the headwear becomes tiny or unreadable.
 """.strip()
 
     if key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
         return """
 MODEL FRAMING:
-- For sleeve placements, keep the target sleeve prominent in frame.
-- A tighter crop is allowed if needed to keep the sleeve placement clearly visible.
+- Show the model full-length (head-to-toe) with the face clearly visible.
+- Keep the target sleeve closest to the camera and prominent in frame.
+- You may slightly raise/rotate the arm naturally to reveal the sleeve panel.
 """.strip()
 
     return """
 MODEL FRAMING:
 - Show the model in full height, from head to feet.
 - Keep the full body silhouette visible in frame.
+- Keep the face clearly visible (not obscured, not cropped).
 - Keep the entire head fully visible, including the top of the head/hair.
 - Keep both feet / full footwear fully visible.
 - Leave a small clean margin above the head and below the feet.
@@ -338,9 +339,9 @@ def _build_focus_block(placement_key: str) -> str:
         return """
 FOCUS / CROPPING (SLEEVE):
 - Output EXACTLY ONE photo (single frame). Do NOT create a diptych, collage, split panel, or multi-view layout.
-- Make this a close-up shot focused ONLY on the target sleeve area.
-- Do NOT show the full body. Avoid showing the face. Avoid showing the whole torso and chest area.
-- The sleeve should fill most of the frame.
+- Show the model full-length (head-to-toe) with the face clearly visible.
+- Use a 3/4 pose so the target sleeve is closest to the camera and clearly readable.
+- Keep the sleeve panel and the applied design clearly visible (do not make it tiny).
 - The application must sit below the shoulder seam and above the sleeve cuff.
 - The application must NOT touch the collar/neckline.
 - Do NOT mirror, flip, or swap garment/person orientation.
@@ -714,12 +715,7 @@ def _wants_full_body_framing(scene_mode: str, product_title: str, placement_key:
     if mode == "product_only":
         return False
 
-    if _is_headwear_product(product_title):
-        return False
-
     key = (placement_key or "").strip()
-    if key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
-        return False
     if key.startswith("mug_"):
         return False
     return True
@@ -728,20 +724,36 @@ def _build_full_body_framing_block() -> str:
     return """
 FULL-BODY FRAMING (CRITICAL):
 - Show the model full-length, head-to-toe (include feet/shoes).
+- Keep the face clearly visible (not obscured, not cropped).
 - Prefer a standing full-body ecommerce pose.
-- Do NOT crop out the head, hands, or feet.
+- Do NOT crop out the head/face, hands, or feet.
 - Keep the product and the target placement area clearly visible (not tiny).
 """.strip()
 
 def _build_compact_framing_hint(product_title: str, placement_key: str) -> str:
     key = (placement_key or "").strip()
     if _is_headwear_product(product_title):
-        return " Framing: upper-body crop; keep the headwear fully visible (do not crop the top)."
+        return " Framing: full-body head-to-toe with face visible; include feet/shoes; keep the headwear fully visible (do not crop the top)."
     if key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
-        return " Framing: keep the target sleeve prominent and clearly visible."
+        return " Framing: full-body head-to-toe with face visible; keep the target sleeve closest to camera and clearly readable."
     if key.startswith("mug_"):
         return ""
-    return " Framing: full-body head-to-toe; include feet/shoes; do not crop the person."
+    return " Framing: full-body head-to-toe with face visible; include feet/shoes; do not crop the person."
+
+
+def _build_compact_sleeve_lock(placement_key: str) -> str:
+    key = (placement_key or "").strip()
+    if key in {"right_sleeve", "wearer_right_sleeve"}:
+        return (
+            " SLEEVE LOCK: Apply design ONLY on the WEARER'S RIGHT sleeve (anatomical right). "
+            "Opposite/left sleeve must stay blank. Do not mirror/flip. If wrong side, redo."
+        )
+    if key in {"left_sleeve", "wearer_left_sleeve"}:
+        return (
+            " SLEEVE LOCK: Apply design ONLY on the WEARER'S LEFT sleeve (anatomical left). "
+            "Opposite/right sleeve must stay blank. Do not mirror/flip. If wrong side, redo."
+        )
+    return ""
 
 
 def _build_compact_viewpoint_hint(placement_key: str) -> str:
@@ -868,7 +880,7 @@ PLACEMENT LOCK (CRITICAL):
         sleeve_extra_lock = """
 SLEEVE-ONLY OUTPUT (CRITICAL):
 - The chest/front torso must remain completely blank and unchanged (no design there).
-- The final photo must prioritize the target sleeve area; keep the chest mostly out of frame.
+- Full-body framing with the face visible is allowed/expected, but the target sleeve must remain the primary visible surface (closest to camera).
 - Do NOT “compromise” by placing the design on the chest because it is more visible.
 - Prefer a clear side or 3/4 side pose where the target sleeve is closest to the camera and fully visible.
 - Straight front-facing poses are not allowed for sleeve-focused outputs.
@@ -975,12 +987,13 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     aspect_ratio = (inputs.aspect_ratio or "").strip() or "3:4"
     framing_hint = _build_compact_framing_hint(inputs.product_title, placement_key)
     viewpoint = _build_compact_viewpoint_hint(placement_key)
+    sleeve_lock = _build_compact_sleeve_lock(placement_key)
     return (
         f"Use image 1 as the base product. Use image 2 as the design source.\n"
         f"TASK: Apply the design as {application} {placement} on the product in image 1 ({inputs.product_title!r}).\n"
         f"{fidelity}\n"
         "EDIT SCOPE: change only what is needed for the application; do not change product color, material, seams, or silhouette.\n"
         "No duplicate placements; do not add extra logos/text.\n"
-        f"{scene}{framing_hint}{viewpoint}\n"
+        f"{scene}{framing_hint}{viewpoint}{sleeve_lock}\n"
         f"Output aspect ratio: {aspect_ratio}."
     ).strip()
