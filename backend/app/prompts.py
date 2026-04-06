@@ -588,6 +588,9 @@ def _build_negative_block(source_kind: str) -> str:
         "- extra embroidery",
         "- extra print",
         "- extra logos",
+        "- stray letters",
+        "- isolated glyph fragments",
+        "- partial wordmarks",
         "- any additional text besides the provided design",
         "- brand marks",
         "- badges",
@@ -661,6 +664,31 @@ TEXT LAYOUT:
 - Keep the text upright, readable, and arranged as a normal horizontal word or line.
 - Do NOT stack letters vertically.
 - Do NOT rotate the text into a vertical reading direction.
+""".strip()
+
+
+def _build_logo_layout_block(placement_key: str, source_kind: str) -> str:
+    if (source_kind or "").strip().lower() != "logo":
+        return ""
+
+    key = (placement_key or "").strip()
+    if key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
+        return """
+LOGO LAYOUT (CRITICAL):
+- Apply the entire logo from image 2 as one intact compact logo lockup.
+- Do NOT split the logo into separate pieces.
+- Do NOT isolate, invent, or add standalone letters, glyphs, initials, or fragments beside the logo.
+- If image 2 contains an icon plus a wordmark, keep that full arrangement together in the same order as image 2.
+- If the full logo feels too long for the sleeve, scale down the whole logo uniformly until it fits.
+- Do NOT crop, truncate, abbreviate, wrap, stack, or partially omit the logo.
+- Do NOT place any detached mark before or after the logo.
+""".strip()
+
+    return """
+LOGO LAYOUT:
+- Keep the logo as one intact mark exactly as shown in image 2.
+- Do NOT split the logo into multiple separate elements.
+- If it feels too large, scale down the entire logo uniformly instead of cropping it.
 """.strip()
 
 
@@ -825,6 +853,7 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
         no_invention = _build_no_invention_block(inputs.source_kind)
         scale_lock = _build_scale_lock_block(placement_key, inputs.source_kind)
         text_layout = _build_text_layout_block(placement_key, inputs.source_kind)
+        logo_layout = _build_logo_layout_block(placement_key, inputs.source_kind)
         sleeve_lock = _build_side_disambiguation_block(placement_key) if is_sleeve else ""
         focus = _build_focus_block(placement_key) if is_sleeve else ""
         scene = _build_fast_scene_block(inputs.scene_mode, inputs.model_gender, inputs.product_title, placement_key)
@@ -866,6 +895,8 @@ Apply the provided design as {application} {placement} on the product in image 1
 
 {text_layout}
 
+{logo_layout}
+
 {garment_lock}
 
 {product_scope_lock}
@@ -899,6 +930,7 @@ Apply the provided design as {application} {placement} on the product in image 1
     no_invention_block = _build_no_invention_block(inputs.source_kind)
     surface_block = _build_surface_conformity_block(inputs.source_kind)
     text_layout_block = _build_text_layout_block(placement_key, inputs.source_kind)
+    logo_layout_block = _build_logo_layout_block(placement_key, inputs.source_kind)
     scale_lock_block = _build_scale_lock_block(placement_key, inputs.source_kind)
     sleeve_exclusion_block = _build_sleeve_exclusion_block(placement_key)
     position_anchor_block = _build_position_anchor_block(placement_key)
@@ -946,6 +978,8 @@ on the product in the first image ("{inputs.product_title}").
 {scale_lock_block}
 
 {text_layout_block}
+
+{logo_layout_block}
 
 {product_scope_lock}
 
@@ -1020,9 +1054,17 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
             layout_hint = " Render it as one small upright horizontal wordmark across the upper sleeve. If it does not fit, reduce size instead of rotating it. Do not stack letters vertically."
         fidelity = f"Text must be EXACTLY: {text!r}. Keep it readable (no distorted letters).{color_hint}{char_hint}{layout_hint}"
     else:
+        layout_hint = ""
+        if placement_key in {"right_sleeve", "wearer_right_sleeve", "left_sleeve", "wearer_left_sleeve"}:
+            layout_hint = (
+                " Keep the logo as one intact compact lockup. "
+                "Do not split it into separate parts or stray letters. "
+                "If it feels too long for the sleeve, scale down the whole logo uniformly instead of cropping or abbreviating it."
+            )
         fidelity = (
             "Logo must match image 2 EXACTLY (shape, colors, spacing, proportions, orientation). "
             "Do not redraw/clean up. If exact match is not possible, leave area blank."
+            f"{layout_hint}"
         )
 
     scene_mode = (inputs.scene_mode or "").strip().lower()
