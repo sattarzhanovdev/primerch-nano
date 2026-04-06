@@ -1100,6 +1100,15 @@ async def generate(
         source_kind=source_kind,
         source_text=text_value if source_kind == "text" else "",
         source_color=text_color if source_kind == "text" else logo_color,
+        remove_logo_bg=(
+            source_kind == "logo"
+            and bool(
+                payload.get("removeLogoBg")
+                or payload.get("remove_logo_bg")
+                or payload.get("logoRemoveBg")
+                or payload.get("logo_remove_bg")
+            )
+        ),
         speed_mode=speed_mode,
     )
     if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:
@@ -1135,6 +1144,8 @@ async def generate(
         prepared_logo_kie_url: str,
         submit_payload: Dict[str, Any],
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        raw_speed = str(submit_payload.get("speed_mode") or submit_payload.get("speedMode") or "").strip().lower()
+        is_fast = raw_speed in {"fast", "speed", "turbo"}
         if submit_payload["provider"] == "kie_gpt4o_image":
             kie_payload = {
                 "filesUrl": [prepared_product_kie_url, prepared_logo_kie_url],
@@ -1142,7 +1153,7 @@ async def generate(
                 "size": submit_payload.get("size") or _map_to_gpt4o_size(submit_payload.get("image_size") or ""),
                 **({"callBackUrl": submit_payload.get("callBackUrl")} if submit_payload.get("callBackUrl") else {}),
                 "nVariants": 1,
-                "isEnhance": False,
+                "isEnhance": not is_fast,
                 "uploadCn": False,
                 "enableFallback": False,
             }
@@ -1180,7 +1191,8 @@ async def generate(
 
         # KIE market model: Wan 2.7 Image (edit/generate).
         if model_name in {"wan/2-7-image", "wan/2-7-image-pro"}:
-            requested_resolution = str(submit_payload.get("resolution") or "1K").strip()
+            default_resolution = "1K" if is_fast else "2K"
+            requested_resolution = str(submit_payload.get("resolution") or default_resolution).strip() or default_resolution
             # For multi-image inputs, provide an empty bbox list per image.
             bbox_list: list[list[list[int]]] = [[] for _ in range(2)]
             wan_payload: Dict[str, Any] = {
@@ -1190,9 +1202,9 @@ async def generate(
                     "prompt": submit_payload["prompt"],
                     "input_urls": [prepared_product_kie_url, prepared_logo_kie_url],
                     "n": int(submit_payload.get("numImages") or 1),
-                    "enable_sequential": False,
+                    "enable_sequential": not is_fast,
                     "resolution": _upstream_resolution_for(requested_resolution),
-                    "thinking_mode": False,
+                    "thinking_mode": not is_fast,
                     "watermark": False,
                     "seed": 0,
                     "bbox_list": bbox_list,

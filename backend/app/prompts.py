@@ -14,6 +14,7 @@ class PromptInputs:
     source_kind: str = "logo"  # logo | text
     source_text: str = ""  # used when source_kind=text
     source_color: str = ""  # used when a custom text/logo color is requested
+    remove_logo_bg: bool = False  # if True, model must cut out logo from its background
     speed_mode: str = "quality"  # quality | fast
 
 
@@ -493,7 +494,13 @@ FINAL CHECK (CRITICAL):
     return ""
 
 
-def _build_source_fidelity_block(source_kind: str, source_text: str, source_color: str = "") -> str:
+def _build_source_fidelity_block(
+    source_kind: str,
+    source_text: str,
+    source_color: str = "",
+    *,
+    remove_logo_bg: bool = False,
+) -> str:
     if (source_kind or "").strip().lower() == "text":
         st = (source_text or "").strip()
         requested_color = (source_color or "").strip()
@@ -566,6 +573,16 @@ COLOR FIDELITY (CRITICAL):
 - Do NOT substitute a nearby shade or recolor it automatically.
 """.strip() if requested_color else ""
 
+    bg_remove = ""
+    if remove_logo_bg:
+        bg_remove = """
+BACKGROUND REMOVAL (CRITICAL):
+- If image 2 contains a background (solid/gradient/photo/paper/texture), treat it as NOT part of the logo.
+- Cut out the logo cleanly and ignore/remove the background completely (transparent cutout effect).
+- Preserve the logo edges (anti-aliasing) with NO white/black halos and NO leftover background pixels.
+- If the background is clearly an intentional part of the logo artwork (e.g., a badge/shape behind the mark), keep it ONLY if it is part of the visible logo itself.
+""".strip()
+
     base = """
 STRICT LOGO FIDELITY:
 - Treat image 2 as the exact master brand artwork.
@@ -575,12 +592,21 @@ STRICT LOGO FIDELITY:
 - Do NOT substitute the logo with a similar brand mark, alternate glyphs, fake letters, or an approximate symbol.
 - If the logo cannot be preserved exactly, leave the target area blank instead of inventing another logo.
 """.strip()
+    parts = [base]
+    if bg_remove:
+        parts.append(bg_remove)
     if color_block:
-        return base + "\n\n" + color_block
-    return base
+        parts.append(color_block)
+    return "\n\n".join(parts)
 
 
-def _build_source_fidelity_block_fast(source_kind: str, source_text: str, source_color: str = "") -> str:
+def _build_source_fidelity_block_fast(
+    source_kind: str,
+    source_text: str,
+    source_color: str = "",
+    *,
+    remove_logo_bg: bool = False,
+) -> str:
     kind = (source_kind or "").strip().lower()
     if kind == "text":
         text = (source_text or "").strip()
@@ -600,11 +626,12 @@ TEXT FIDELITY (CRITICAL):
 
     requested_color = (source_color or "").strip()
     color_line = f"\n- Keep the logo in EXACTLY this color: {requested_color}. Do NOT revert it." if requested_color else ""
+    bg_line = "\n- Remove/cut out any background from image 2; treat it as transparent." if remove_logo_bg else ""
     return f"""
 LOGO FIDELITY (CRITICAL):
 - Copy the logo from image 2 EXACTLY (shape, colors, spacing, proportions, orientation).
 - Do NOT redraw, restyle, simplify, enhance, or "clean up" the logo.
-- If exact fidelity is not possible, leave the area blank (do not invent).{color_line}
+- If exact fidelity is not possible, leave the area blank (do not invent).{bg_line}{color_line}
 """.strip()
 
 
@@ -900,7 +927,12 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
 
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
-        fidelity = _build_source_fidelity_block_fast(inputs.source_kind, inputs.source_text, inputs.source_color)
+        fidelity = _build_source_fidelity_block_fast(
+            inputs.source_kind,
+            inputs.source_text,
+            inputs.source_color,
+            remove_logo_bg=inputs.remove_logo_bg,
+        )
         no_invention = _build_no_invention_block(inputs.source_kind)
         scale_lock = _build_scale_lock_block(placement_key, inputs.source_kind)
         text_layout = _build_text_layout_block(placement_key, inputs.source_kind)
@@ -980,7 +1012,12 @@ Apply the provided design as {application} {placement} on the product in image 1
     side_block = _build_side_disambiguation_block(placement_key)
     material_block = _build_material_block(inputs.application, inputs.source_kind)
     negative_block = _build_negative_block(inputs.source_kind)
-    fidelity_block = _build_source_fidelity_block(inputs.source_kind, inputs.source_text, inputs.source_color)
+    fidelity_block = _build_source_fidelity_block(
+        inputs.source_kind,
+        inputs.source_text,
+        inputs.source_color,
+        remove_logo_bg=inputs.remove_logo_bg,
+    )
     no_invention_block = _build_no_invention_block(inputs.source_kind)
     surface_block = _build_surface_conformity_block(inputs.source_kind)
     text_layout_block = _build_text_layout_block(placement_key, inputs.source_kind)
@@ -1117,10 +1154,15 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
                 "Do not split it into separate parts or stray letters. "
                 "If it feels too long for the sleeve, scale down the whole logo uniformly instead of cropping or abbreviating it."
             )
+        bg_hint = ""
+        if inputs.remove_logo_bg:
+            bg_hint = (
+                " If image 2 contains a background (solid/gradient/photo/paper/texture), remove/cut it out and use ONLY the logo mark as a clean transparent cutout (no halos)."
+            )
         fidelity = (
             "Logo must match image 2 EXACTLY (shape, colors, spacing, proportions, orientation). "
             "Do not redraw/clean up. If exact match is not possible, leave area blank."
-            f"{layout_hint}"
+            f"{bg_hint}{layout_hint}"
         )
 
     scene_mode = (inputs.scene_mode or "").strip().lower()
