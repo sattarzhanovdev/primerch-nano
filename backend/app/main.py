@@ -92,6 +92,34 @@ def _base_json_path() -> Path:
     return repo_root() / "base.json"
 
 
+def _safe_join_under(base_dir: Path, relative_path: str) -> Path | None:
+    base_resolved = base_dir.resolve()
+    candidate = (base_dir / relative_path).resolve()
+    try:
+        candidate.relative_to(base_resolved)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _local_app_file_path(source_url: str, *, server_base: str = "") -> Path | None:
+    src = (source_url or "").strip()
+    if not src:
+        return None
+
+    if server_base and src.startswith(server_base):
+        src = src[len(server_base):]
+
+    src = src.split("?", 1)[0]
+    if src.startswith("/uploads/"):
+        rel = src.split("/uploads/", 1)[1]
+        return _safe_join_under(uploads_dir(), rel)
+    if src.startswith("/assets/"):
+        rel = src.split("/assets/", 1)[1]
+        return _safe_join_under(_frontend_dir() / "assets", rel)
+    return None
+
+
 @dataclass(frozen=True)
 class CatalogItem:
     data: Dict[str, Any]
@@ -235,11 +263,9 @@ async def _transform_input_image_to_upload_url(
         return cached
 
     blob: bytes | None = None
-    if src.startswith(server_base + "/uploads/"):
-        name = src.split("/uploads/", 1)[1].split("?", 1)[0]
-        local = uploads_dir() / name
-        if local.exists():
-            blob = local.read_bytes()
+    local = _local_app_file_path(src, server_base=server_base)
+    if local and local.exists():
+        blob = local.read_bytes()
     elif is_public_http_url(src):
         client = get_http_client()
         res = await client.get(src, timeout=30, follow_redirects=True)
@@ -413,12 +439,11 @@ async def _resolve_kie_asset_url(
 async def _upload_to_kie(source_url: str, *, server_base: str, upload_path: str = "primerch") -> str:
     client = get_client()
 
-    # If the URL points to our own /uploads, we can stream-upload without public exposure.
-    if source_url.startswith(server_base + "/uploads/"):
-        name = source_url.split("/uploads/", 1)[1].split("?", 1)[0]
-        local = uploads_dir() / name
+    # If the URL points to our own /uploads or /assets, we can stream-upload without public exposure.
+    local = _local_app_file_path(source_url, server_base=server_base)
+    if local is not None:
         if not local.exists():
-            raise HTTPException(status_code=400, detail=f"Upload not found on server: {name}")
+            raise HTTPException(status_code=400, detail=f"Local asset not found on server: {source_url}")
         up = await client.file_stream_upload(local, upload_path=upload_path)
         file_url = extract_uploaded_file_url(up)
         if not file_url:
@@ -656,6 +681,16 @@ def _default_product_image(product: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _has_local_catalog_images(product: Dict[str, Any]) -> bool:
+    images = product.get("images") or product.get("photos") or []
+    if not isinstance(images, list) or not images:
+        return False
+    return any(
+        isinstance(image, str) and image.strip().startswith(("/assets/", "/uploads/"))
+        for image in images
+    )
+
+
 def _is_sleeve_placement(placement: str) -> bool:
     return (placement or "").strip() in {
         "right_sleeve",
@@ -762,7 +797,7 @@ def _normalize_product(raw: Dict[str, Any]) -> Dict[str, Any]:
             if not isinstance(u, str):
                 continue
             u = u.strip()
-            if not u.startswith("http"):
+            if not (u.startswith("http") or u.startswith("/")):
                 continue
             if "mc.yandex.ru" in u:
                 continue
@@ -903,6 +938,8 @@ async def list_products(
 
     for item in catalog.items:
         p = item.data
+        if not _has_local_catalog_images(p):
+            continue
         p_gender = str(p.get("gender") or "unisex")
         if gender_norm and gender_norm != "all":
             # Unisex items should be visible for both male/female selections.
