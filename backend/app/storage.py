@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import secrets
-from pathlib import Path
 import io
 import asyncio
+import secrets
+from pathlib import Path
 from typing import Final, Tuple
 from urllib.parse import urlparse
 
@@ -108,20 +108,22 @@ def _is_allowed_image(file: UploadFile) -> bool:
     return False
 
 
-def _remove_bg_sync(blob: bytes) -> Tuple[bytes, bool]:
+def _remove_bg_sync(blob: bytes) -> Tuple[bytes, bool, str]:
     try:
         from rembg import remove
         img = Image.open(io.BytesIO(blob)).convert("RGBA")
         out = remove(img)
         mem = io.BytesIO()
         out.save(mem, format="PNG")
-        return mem.getvalue(), True
+        return mem.getvalue(), True, ""
     except ImportError:
-        print("rembg not installed")
-        return blob, False
+        msg = "Background removal dependencies are not installed"
+        print(msg)
+        return blob, False, msg
     except Exception as e:
-        print(f"Error removing context: {e}")
-        return blob, False
+        msg = f"Background removal failed: {e}"
+        print(msg)
+        return blob, False, msg
 
 async def save_upload_image(request: Request, file: UploadFile, remove_bg: bool = False) -> Tuple[str, str, str]:
     if not _is_allowed_image(file):
@@ -138,7 +140,9 @@ async def save_upload_image(request: Request, file: UploadFile, remove_bg: bool 
     upload_content_type = file.content_type or ""
 
     if remove_bg:
-        blob, removed = await asyncio.to_thread(_remove_bg_sync, blob)
+        blob, removed, error_message = await asyncio.to_thread(_remove_bg_sync, blob)
+        if not removed:
+            raise HTTPException(status_code=503, detail=error_message or "Background removal is unavailable")
         if removed:
             upload_filename = f"{upload_filename}_nobg.png"
             upload_content_type = "image/png"
