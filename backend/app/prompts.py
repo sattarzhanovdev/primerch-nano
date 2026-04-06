@@ -128,6 +128,56 @@ def _build_compact_product_scope_hint(product_title: str) -> str:
     return ""
 
 
+def _build_overlap_avoidance_block(product_title: str, placement_key: str) -> str:
+    key = (placement_key or "").strip()
+    lines = [
+        "OVERLAP AVOIDANCE (CRITICAL):",
+        "- Keep the entire application on one clean uninterrupted printable surface of the target product.",
+        "- Do NOT place the design over seams, stitching, piping, panel joins, pockets, zippers, buttons, snaps, drawstrings, labels, tags, closures, buckles, or hardware.",
+        "- Do NOT let the design cross from the target surface onto trim, ribbing, straps, handles, accessories, or background elements.",
+        "- If a product detail blocks the requested area, move the design within the SAME placement to the nearest blank area or scale it down.",
+        "- Never solve the fit by printing over product construction details.",
+    ]
+
+    if key in {"chest", "front", "belly", "back"}:
+        lines.extend([
+            "- Keep the design inside one flat torso panel with clear margins from the collar, neckline, shoulder seams, side seams, hem, placket, hood opening, and cuffs.",
+            "- Do NOT place the design on or across a pocket, kangaroo pocket, zipper, button placket, drawstring, or ribbed waistband.",
+        ])
+    elif key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
+        lines.extend([
+            "- Keep the design fully inside the sleeve panel and away from the shoulder seam, armhole seam, cuff, and any panel boundary.",
+            "- Do NOT place the design on the shoulder top, collar, torso panel, or across any seam.",
+        ])
+    elif key.startswith("mug_"):
+        lines.extend([
+            "- Keep the design on the smooth mug body only.",
+            "- Do NOT place the design on or across the handle, rim, base, inner lip, or shadow/background.",
+        ])
+    elif _is_headwear_product(product_title):
+        lines.extend([
+            "- Keep the design on the requested cap panel only.",
+            "- Do NOT place the design over the brim edge, top button, eyelets, panel seams, sweatband edge, or back strap/closure.",
+        ])
+
+    return "\n".join(lines)
+
+
+def _build_compact_overlap_avoidance_hint(product_title: str, placement_key: str) -> str:
+    key = (placement_key or "").strip()
+    hint = (
+        " Keep the application on one clean uninterrupted printable surface only. "
+        "Never place it over seams, pockets, zippers, buttons, labels, drawstrings, hardware, or other product details. "
+        "If space is tight, scale down or shift within the same placement."
+    )
+
+    if key.startswith("mug_"):
+        return hint + " Mug only: stay on the mug body, not the handle, rim, or base."
+    if _is_headwear_product(product_title):
+        return hint + " Headwear only: avoid brim edges, eyelets, panel seams, and back strap/closure."
+    return hint
+
+
 def _build_model_framing_block(product_title: str, placement_key: str) -> str:
     key = (placement_key or "").strip()
 
@@ -764,7 +814,7 @@ def _build_position_anchor_block(placement_key: str) -> str:
 POSITION ANCHOR:
 - Anchor the design at the center of the wearer's right sleeve panel.
 - Keep a clear margin from the shoulder seam above and the cuff below.
-- Keep the entire text inside the sleeve panel boundaries.
+- Keep the entire design inside the sleeve panel boundaries.
 """.strip()
 
     if placement_key in {"left_sleeve", "wearer_left_sleeve"}:
@@ -772,7 +822,7 @@ POSITION ANCHOR:
 POSITION ANCHOR:
 - Anchor the design at the center of the wearer's left sleeve panel.
 - Keep a clear margin from the shoulder seam above and the cuff below.
-- Keep the entire text inside the sleeve panel boundaries.
+- Keep the entire design inside the sleeve panel boundaries.
 """.strip()
 
     return ""
@@ -846,6 +896,7 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     is_sleeve = placement_key in {"wearer_right_sleeve", "wearer_left_sleeve"}
     full_body_block = _build_full_body_framing_block() if _wants_full_body_framing(inputs.scene_mode, inputs.product_title, placement_key) else ""
     product_scope_lock = _build_product_scope_lock(inputs.product_title)
+    overlap_avoidance_block = _build_overlap_avoidance_block(inputs.product_title, placement_key)
 
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
@@ -857,6 +908,7 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
         sleeve_lock = _build_side_disambiguation_block(placement_key) if is_sleeve else ""
         focus = _build_focus_block(placement_key) if is_sleeve else ""
         scene = _build_fast_scene_block(inputs.scene_mode, inputs.model_gender, inputs.product_title, placement_key)
+        overlap_hint = _build_compact_overlap_avoidance_hint(inputs.product_title, placement_key)
         garment_lock = """
 GARMENT LOCK (CRITICAL):
 - Keep the garment/product EXACTLY the same as the first image.
@@ -910,6 +962,8 @@ Apply the provided design as {application} {placement} on the product in image 1
 {placement_lock}
 
 {scene}
+
+{overlap_hint}
 
 - Photorealistic ecommerce studio photo.
 - Output aspect ratio: {inputs.aspect_ratio}.
@@ -1009,6 +1063,8 @@ STRICT EDIT SCOPE:
 
 {sleeve_exclusion_block}
 
+{overlap_avoidance_block}
+
 {strict_placement_lock}
 
 {sleeve_extra_lock}
@@ -1079,12 +1135,13 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     viewpoint = _build_compact_viewpoint_hint(placement_key)
     sleeve_lock = _build_compact_sleeve_lock(placement_key)
     product_scope = _build_compact_product_scope_hint(inputs.product_title)
+    overlap_hint = _build_compact_overlap_avoidance_hint(inputs.product_title, placement_key)
     return (
         f"Use image 1 as the base product. Use image 2 as the design source.\n"
         f"TASK: Apply the design as {application} {placement} on the product in image 1 ({inputs.product_title!r}).\n"
         f"{fidelity}\n"
         "EDIT SCOPE: change only what is needed for the application; do not change product color, material, seams, or silhouette.\n"
         "No duplicate placements; do not add extra logos/text.\n"
-        f"{scene}{product_scope}{framing_hint}{viewpoint}{sleeve_lock}\n"
+        f"{scene}{product_scope}{framing_hint}{viewpoint}{sleeve_lock}{overlap_hint}\n"
         f"Output aspect ratio: {aspect_ratio}."
     ).strip()
