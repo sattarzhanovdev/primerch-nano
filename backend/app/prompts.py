@@ -214,6 +214,8 @@ SCENE RULES:
 - Do NOT add a person, model, mannequin, arms, hands, or body.
 - Preserve the original product shape and product presentation.
 - Do NOT redesign the scene.
+- Show the FULL product in the frame, so the entire item is visible.
+- Do NOT crop the product.
 - Keep the target placement area clearly visible.
 
 GARMENT IDENTITY LOCK (CRITICAL):
@@ -270,6 +272,8 @@ def _build_fast_scene_block(scene_mode: str, model_gender: str, product_title: s
 SCENE:
 - Product-only ecommerce studio photo.
 - Do NOT add a person, model, mannequin, body, arms, or hands.
+- Show the FULL product in the frame, so the entire item is visible.
+- Do NOT crop the product.
 - Keep the target area clearly visible.
 """.strip()
         if viewpoint_block:
@@ -765,7 +769,11 @@ FULL-BODY FRAMING (CRITICAL):
 - Keep the product and the target placement area clearly visible (not tiny).
 """.strip()
 
-def _build_compact_framing_hint(product_title: str, placement_key: str) -> str:
+def _build_compact_framing_hint(scene_mode: str, product_title: str, placement_key: str) -> str:
+    mode = (scene_mode or "").strip().lower()
+    if mode == "product_only":
+        return ""
+
     key = (placement_key or "").strip()
     if _is_headwear_product(product_title):
         return " Framing: full-body head-to-toe with face visible; include feet/shoes; keep the headwear fully visible (do not crop the top)."
@@ -1019,13 +1027,13 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
 
     scene_mode = (inputs.scene_mode or "").strip().lower()
     if scene_mode == "product_only":
-        scene = "Keep product-only (no human, no mannequin)."
+        scene = "Keep product-only (no human, no mannequin). Show the FULL product in the frame, so the entire item is visible. Do NOT crop the product."
     else:
         model_text = _human_model_text(inputs.model_gender)
         scene = f"Show the same product worn by a real {model_text} in a simple ecommerce studio photo."
 
     aspect_ratio = (inputs.aspect_ratio or "").strip() or "3:4"
-    framing_hint = _build_compact_framing_hint(inputs.product_title, placement_key)
+    framing_hint = _build_compact_framing_hint(inputs.scene_mode, inputs.product_title, placement_key)
     viewpoint = _build_compact_viewpoint_hint(placement_key)
     sleeve_lock = _build_compact_sleeve_lock(placement_key)
     product_scope = _build_compact_product_scope_hint(inputs.product_title)

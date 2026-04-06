@@ -21,6 +21,7 @@ const state = {
   placement: "",
   mode: "logo", // logo | text
   logoUrl: "",
+  removeLogoBg: true,
   logoColorMode: "original", // original | custom
   logoColor: DEFAULT_CUSTOM_LOGO_COLOR,
   text: "",
@@ -132,6 +133,17 @@ function inferProductType(p) {
 function isApparelLike(p) {
   const t = p?.type || inferProductType(p);
   return t === "apparel" || t === "tshirt";
+}
+
+function isApronLike(p) {
+  const title = String(p?.title || "").toLowerCase();
+  const category = String(p?.category || "").toLowerCase();
+  const hay = `${title} ${category}`;
+  return hay.includes("фартук") || hay.includes("apron");
+}
+
+function isSleevePlacementId(placementId) {
+  return placementId === "wearer_left_sleeve" || placementId === "wearer_right_sleeve";
 }
 
 function resetProductSearch() {
@@ -619,15 +631,15 @@ function renderCustomize() {
         el("div", { class: "hr" }),
         isApparel
           ? el("div", { class: "seg" }, [
-              el("button", {
-                class: `btn small ${state.tshirtView === "front" ? "success" : ""}`,
-                onclick: () => { state.tshirtView = "front"; render(); },
-              }, ["Перед"]),
-              el("button", {
-                class: `btn small ${state.tshirtView === "back" ? "success" : ""}`,
-                onclick: () => { state.tshirtView = "back"; render(); },
-              }, ["Спина"]),
-            ])
+            el("button", {
+              class: `btn small ${state.tshirtView === "front" ? "success" : ""}`,
+              onclick: () => { state.tshirtView = "front"; render(); },
+            }, ["Перед"]),
+            el("button", {
+              class: `btn small ${state.tshirtView === "back" ? "success" : ""}`,
+              onclick: () => { state.tshirtView = "back"; render(); },
+            }, ["Спина"]),
+          ])
           : el("div", { style: "height: 0px;" }),
         el("div", { class: "hr" }),
         el("div", { class: "mock" }, [
@@ -663,14 +675,18 @@ function renderCustomize() {
 }
 
 function apparelZonePicker() {
-  const sleeveLeft = el("div", { class: "zone-card" }, [
-    sleeveSvg("wearer_left_sleeve"),
-    el("div", { class: "zone-caption" }, ["Левый рукав"]),
-  ]);
-
   const center = el("div", { class: "zone-card center" }, [
     torsoSvg(state.tshirtView === "back" ? "back" : "front"),
     el("div", { class: "zone-caption" }, [state.tshirtView === "back" ? "Спина" : "Перед"]),
+  ]);
+
+  if (isApronLike(state.selected)) {
+    return el("div", { class: "zone-picker" }, [center]);
+  }
+
+  const sleeveLeft = el("div", { class: "zone-card" }, [
+    sleeveSvg("wearer_left_sleeve"),
+    el("div", { class: "zone-caption" }, ["Левый рукав"]),
   ]);
 
   const sleeveRight = el("div", { class: "zone-card" }, [
@@ -877,6 +893,9 @@ function logoUploader() {
       try {
         const form = new FormData();
         form.append("file", file);
+        if (state.removeLogoBg) {
+          form.append("remove_bg", "true");
+        }
         const res = await fetch("/api/uploads", { method: "POST", body: form });
         const text = await res.text();
         if (!res.ok) throw new Error(`Upload failed: ${res.status} ${text}`);
@@ -890,7 +909,20 @@ function logoUploader() {
       }
     },
   });
+  
+  const bgRmWrap = el("div", { style: "display:flex;align-items:center;gap:8px;margin-top:10px;margin-bottom:10px;" }, [
+    el("input", {
+      type: "checkbox",
+      checked: state.removeLogoBg,
+      onchange: (e) => {
+        state.removeLogoBg = e.target.checked;
+      }
+    }),
+    el("span", {}, ["Удалить фон (ИИ)"])
+  ]);
+
   wrap.appendChild(input);
+  wrap.appendChild(bgRmWrap);
   wrap.appendChild(info);
   wrap.appendChild(warn);
   wrap.appendChild(el("div", { class: "hr" }));
@@ -1113,6 +1145,12 @@ async function onGenerate() {
     alert("Выбери зону нанесения");
     return;
   }
+  if (isApronLike(state.selected) && isSleevePlacementId(state.placement)) {
+    state.placement = "";
+    render();
+    alert("Для фартука рукава недоступны. Выбери зону на передней части или спине.");
+    return;
+  }
   if (state.mode === "logo" && !state.logoUrl) {
     alert("Загрузи логотип");
     return;
@@ -1197,6 +1235,101 @@ async function onGenerate() {
   }
 }
 
+function zoomableImage(src) {
+  let scale = 1;
+  let posX = 0;
+  let posY = 0;
+  let isDragging = false;
+  let startX = 0;
+  let startY = 0;
+
+  const img = el("img", {
+    src,
+    alt: "result",
+    style: "width:100%; display:block; transition: transform 0.15s ease-out; transform-origin: center center; user-select: none; pointer-events: none;",
+    referrerpolicy: "no-referrer",
+    loading: "lazy",
+  });
+
+  const updateTransform = () => {
+    img.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`;
+    if (scale <= 1) {
+      container.style.cursor = "default";
+    } else {
+      container.style.cursor = isDragging ? "grabbing" : "grab";
+    }
+  };
+
+  const container = el("div", {
+    class: "zoom-container",
+    style: "position: relative; width: 100%; border-radius: 14px; border: 1px solid rgba(255,255,255,0.10); overflow: hidden; background: #000;",
+    onwheel: (e) => {
+      e.preventDefault();
+      const ds = e.deltaY < 0 ? 0.2 : -0.2;
+      scale = Math.max(1, Math.min(scale + ds, 6));
+      if (scale === 1) { posX = 0; posY = 0; }
+      updateTransform();
+    },
+    onmousedown: (e) => {
+      if (scale > 1) {
+        isDragging = true;
+        startX = e.clientX - posX;
+        startY = e.clientY - posY;
+        container.style.cursor = "grabbing";
+      }
+    },
+    onmousemove: (e) => {
+      if (!isDragging) return;
+      e.preventDefault();
+      posX = e.clientX - startX;
+      posY = e.clientY - startY;
+      img.style.transition = "none";
+      img.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`;
+    },
+    onmouseup: () => {
+      if (isDragging) {
+        isDragging = false;
+        img.style.transition = "transform 0.15s ease-out";
+        updateTransform();
+      }
+    },
+    onmouseleave: () => {
+      if (isDragging) {
+        isDragging = false;
+        img.style.transition = "transform 0.15s ease-out";
+        updateTransform();
+      }
+    }
+  }, [img]);
+
+  const btnZoomIn = el("button", {
+    class: "btn",
+    style: "position: absolute; bottom: 12px; right: 54px; z-index: 10; font-size: 14px; padding: 6px 12px; border-radius: 8px; background: rgba(30,30,30,0.8); backdrop-filter: blur(4px);",
+    title: "Увеличить",
+    onclick: (e) => {
+      e.preventDefault();
+      scale = Math.min(scale + 0.5, 6);
+      updateTransform();
+    }
+  }, ["+ 🔎"]);
+
+  const btnZoomOut = el("button", {
+    class: "btn",
+    style: "position: absolute; bottom: 12px; right: 12px; z-index: 10; font-size: 14px; padding: 6px 12px; border-radius: 8px; background: rgba(30,30,30,0.8); backdrop-filter: blur(4px);",
+    title: "Уменьшить",
+    onclick: (e) => {
+      e.preventDefault();
+      scale = Math.max(scale - 0.5, 1);
+      if (scale === 1) { posX = 0; posY = 0; }
+      updateTransform();
+    }
+  }, ["- 🔎"]);
+
+  container.appendChild(el("div", {}, [btnZoomIn, btnZoomOut]));
+
+  return container;
+}
+
 function renderResult() {
   const task = state.taskId
     ? el("span", { class: "badge" }, [`Номер: ${state.taskId.slice(0, 8)}`])
@@ -1211,13 +1344,7 @@ function renderResult() {
       return el("div", {}, [
         progressNode,
         el("div", { class: "hr" }),
-        el("img", {
-          src: state.resultUrl,
-          alt: "result",
-          style: "width:100%;border-radius:14px;border:1px solid rgba(255,255,255,0.10);",
-          referrerpolicy: "no-referrer",
-          loading: "lazy",
-        }),
+        zoomableImage(state.resultUrl)
       ]);
     }
     if (state.taskState === "failed" || state.taskState === "error" || state.taskState === "fail") {

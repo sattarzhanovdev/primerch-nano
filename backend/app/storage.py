@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import secrets
 from pathlib import Path
+import io
+import asyncio
 from typing import Final, Tuple
 from urllib.parse import urlparse
+
+from PIL import Image
 
 from fastapi import HTTPException, Request, UploadFile
 
@@ -104,7 +108,22 @@ def _is_allowed_image(file: UploadFile) -> bool:
     return False
 
 
-async def save_upload_image(request: Request, file: UploadFile) -> Tuple[str, str]:
+def _remove_bg_sync(blob: bytes) -> Tuple[bytes, bool]:
+    try:
+        from rembg import remove
+        img = Image.open(io.BytesIO(blob)).convert("RGBA")
+        out = remove(img)
+        mem = io.BytesIO()
+        out.save(mem, format="PNG")
+        return mem.getvalue(), True
+    except ImportError:
+        print("rembg not installed")
+        return blob, False
+    except Exception as e:
+        print(f"Error removing context: {e}")
+        return blob, False
+
+async def save_upload_image(request: Request, file: UploadFile, remove_bg: bool = False) -> Tuple[str, str, str]:
     if not _is_allowed_image(file):
         raise HTTPException(
             status_code=400,
@@ -115,10 +134,19 @@ async def save_upload_image(request: Request, file: UploadFile) -> Tuple[str, st
     if len(blob) > settings.MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=400, detail="File too large")
 
-    ext = _safe_ext(file.filename or "", file.content_type or "")
+    upload_filename = file.filename or "file"
+    upload_content_type = file.content_type or ""
+
+    if remove_bg:
+        blob, removed = await asyncio.to_thread(_remove_bg_sync, blob)
+        if removed:
+            upload_filename = f"{upload_filename}_nobg.png"
+            upload_content_type = "image/png"
+
+    ext = _safe_ext(upload_filename, upload_content_type)
     filename = f"{secrets.token_hex(16)}{ext}"
     path = uploads_dir() / filename
     path.write_bytes(blob)
 
     url = build_file_url(request, f"/uploads/{filename}")
-    return filename, url
+    return filename, url, upload_content_type

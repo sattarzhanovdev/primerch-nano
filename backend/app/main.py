@@ -14,7 +14,7 @@ from uuid import uuid4
 import sys
 from urllib.parse import urlparse
 
-from fastapi import BackgroundTasks, Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -960,9 +960,13 @@ async def list_products(
 
 
 @app.post("/api/uploads")
-async def upload_image(request: Request, file: UploadFile = File(...)) -> Dict[str, Any]:
-    filename, url = await save_upload_image(request, file)
-    return {"filename": filename, "url": url, "contentType": file.content_type}
+async def upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    remove_bg: bool = Form(False)
+) -> Dict[str, Any]:
+    filename, url, content_type = await save_upload_image(request, file, remove_bg=remove_bg)
+    return {"filename": filename, "url": url, "contentType": content_type}
 
 
 @app.post("/api/assets/prepare")
