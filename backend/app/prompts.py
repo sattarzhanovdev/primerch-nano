@@ -6,8 +6,8 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class PromptInputs:
     product_title: str
-    application: str  # embroidery, screen_print, dtf, patch, engraving, sublimation
-    placement: str  # wearer_right_sleeve, wearer_left_sleeve, chest, back, front, belly, mug_left, mug_right, mug_wrap
+    application: str  # tampon_print, screen_print, dtg, dtf, decal, embroidery, engraving
+    placement: str  # chest
     aspect_ratio: str = "3:4"
     scene_mode: str = "on_model"  # product_only | on_model
     model_gender: str = "neutral"  # male | female | neutral
@@ -39,28 +39,101 @@ PLACEMENT_HINTS: dict[str, str] = {
 }
 
 APPLICATION_HINTS: dict[str, str] = {
-    "print": "ultra-realistic print",
-    "embroidery": "ultra-realistic premium embroidery",
-    "screen_print": "ultra-realistic screen print",
-    "dtf": "ultra-realistic DTF transfer print",
-    "dtg": "ultra-realistic DTG direct-to-garment print",
-    "heat_transfer": "ultra-realistic heat transfer (thermotransfer) print",
-    "patch": "ultra-realistic sewn fabric patch",
-    "engraving": "ultra-realistic laser engraving",
-    "sublimation": "ultra-realistic sublimation print",
-    "flex": "ultra-realistic flex vinyl heat transfer",
-    "flock": "ultra-realistic flock vinyl (velvety) heat transfer",
-    "puff_print": "ultra-realistic puff print (raised ink)",
-    "high_density": "ultra-realistic high-density print (thick raised ink)",
-    "reflective": "ultra-realistic reflective print (retroreflective, subtle shine)",
-    "foil": "ultra-realistic foil print (metallic foil transfer)",
-    "glitter": "ultra-realistic glitter print (sparkly particles)",
-    "neon": "ultra-realistic neon ink print (very bright colors)",
-    "glow": "ultra-realistic glow-in-the-dark print (photoluminescent ink)",
-    "rubber_print": "ultra-realistic rubber print (soft-touch raised ink)",
-    "water_based": "ultra-realistic water-based ink print (matte, absorbed)",
-    "plastisol": "ultra-realistic plastisol ink print (slight thickness, opaque)",
+    "tampon_print": "ultra-realistic tampoprint (pad printing): very sharp small print, thin ink layer, no transfer film edge",
+    "screen_print": "ultra-realistic screen print: crisp edges, solid coverage, mostly matte ink, very subtle thickness",
+    "dtg": "ultra-realistic DTG direct-to-garment print: ink absorbed into fibers, no raised edge, no transfer film, soft matte finish",
+    "dtf": "ultra-realistic DTF heat transfer: thin carrier film, slight gloss, subtle film edge (no thick sticker look)",
+    "decal": "ultra-realistic decal transfer (overglaze/cold decal): extremely thin, slightly glossy, integrated into the surface (no fabric texture)",
+    "embroidery": "ultra-realistic premium embroidery: stitched threads, visible stitches, subtle raised relief",
+    "engraving": "ultra-realistic laser engraving: etched/recessed mark, no ink print, material-interaction shading",
 }
+
+def _build_compact_technique_hint(application: str) -> str:
+    app = (application or "").strip().lower()
+    if app == "screen_print":
+        return "Technique: screen print (matte ink on top of fabric, crisp edges, no transfer film)."
+    if app == "dtg":
+        return "Technique: DTG (ink absorbed into fibers; matte; NO transfer film edge; fabric grain shows through)."
+    if app == "dtf":
+        return "Technique: DTF (thin heat-transfer layer; slight gloss; very subtle edge; NOT ink-absorbed)."
+    if app == "tampon_print":
+        return "Technique: tampoprint (very sharp thin ink, minimal distortion; NO film edge; NOT embroidered)."
+    if app == "decal":
+        return "Technique: decal transfer (ultra-thin, slightly glossy, sealed look; no fabric-texture absorption)."
+    if app == "embroidery":
+        return "Technique: embroidery (real stitched threads with visible stitches and subtle raised relief; NOT flat print)."
+    if app == "engraving":
+        return "Technique: laser engraving (etched/recessed tone-on-tone mark; NOT colored ink print)."
+    return ""
+
+
+def _build_technique_lock_block(application: str) -> str:
+    """
+    Adds explicit technique-disambiguation so different application methods remain visually distinct.
+    """
+    app = (application or "").strip().lower()
+
+    if app == "screen_print":
+        return """
+TECHNIQUE LOCK (SCREEN PRINT):
+- Matte ink on top of fabric with crisp edges and solid coverage.
+- Very subtle ink thickness is OK, but do NOT make it puffy/high-relief.
+- Absolutely NO transfer film / carrier outline.
+- Do NOT make it look like DTG (absorbed) or DTF (glossy film transfer).
+""".strip()
+
+    if app == "dtg":
+        return """
+TECHNIQUE LOCK (DTG):
+- Ink must look absorbed into the fibers: soft matte, fabric grain visible through the print.
+- No glossy sheen, no carrier film, no visible transfer edge.
+- Edges can be slightly softened by the fabric texture (but keep the design readable).
+- Do NOT make it look like DTF (gloss + subtle film edge) or screen print (ink sitting on top).
+""".strip()
+
+    if app == "dtf":
+        return """
+TECHNIQUE LOCK (DTF):
+- Must look like a thin heat-transfer layer: slightly glossy, high color density, clean shape.
+- A very subtle edge is allowed; but do NOT show a big rectangular film border.
+- Do NOT make it look absorbed into fibers (DTG look is forbidden).
+- Do NOT make it look like thick sticker/plastic patch.
+""".strip()
+
+    if app == "tampon_print":
+        return """
+TECHNIQUE LOCK (TAMPOPRINT / PAD PRINT):
+- Extremely sharp small print with a thin ink layer and crisp edges.
+- Minimal warping; keep the design very clean and precise.
+- NO glossy transfer film edge; NO embroidery texture.
+- Do NOT make it look like DTG (fiber absorption) or DTF (transfer film).
+""".strip()
+
+    if app == "decal":
+        return """
+TECHNIQUE LOCK (DECAL):
+- Ultra-thin transfer with a slightly glossy sealed look.
+- No raised ink thickness, no embroidered thread texture, no fabric-absorbed ink look.
+- Do NOT show a thick sticker border or chunky plastic film.
+""".strip()
+
+    if app == "embroidery":
+        return """
+TECHNIQUE LOCK (EMBROIDERY):
+- Visible stitched threads, stitch direction, stitch density, and subtle raised relief.
+- Should look physically sewn into fabric (micro-shadows around thread).
+- Do NOT make it look like flat ink print (screen/DTG/DTF) or like engraved/etched.
+""".strip()
+
+    if app == "engraving":
+        return """
+TECHNIQUE LOCK (LASER ENGRAVING):
+- Etched/recessed tone-on-tone mark with subtle depth shading and micro-shadows.
+- No ink, no embroidery threads, no glossy film, no colored print.
+- Do NOT turn it into a printed decal/transfer.
+""".strip()
+
+    return ""
 
 
 def _human_model_text(model_gender: str) -> str:
@@ -197,6 +270,15 @@ MODEL FRAMING:
 - Show the model full-length (head-to-toe) with the face clearly visible.
 - Keep the target sleeve closest to the camera and prominent in frame.
 - You may slightly raise/rotate the arm naturally to reveal the sleeve panel.
+""".strip()
+
+    if key == "chest":
+        return """
+MODEL FRAMING:
+- Show a compact upper-body ecommerce photo (head to waist/hips).
+- Keep the face visible and the entire head fully in frame.
+- Keep the chest/upper torso large and centered so the application is clearly readable.
+- Do NOT frame head-to-toe full-length; avoid showing feet/shoes.
 """.strip()
 
     return """
@@ -349,8 +431,9 @@ SCENE:
 
 def _build_material_block(application: str, source_kind: str) -> str:
     kind = (source_kind or "").strip().lower()
+    app = (application or "").strip().lower()
 
-    if application == "embroidery":
+    if app == "embroidery":
         if kind == "text":
             return """
 EMBROIDERY TEXT REALISM:
@@ -377,44 +460,102 @@ EMBROIDERY REALISM:
 - Avoid flat printed appearance, sticker look, plastic gloss, or floating appearance.
 """.strip()
 
-    if application in {
-        "screen_print",
-        "dtf",
-        "dtg",
-        "heat_transfer",
-        "sublimation",
-        "flex",
-        "flock",
-        "puff_print",
-        "high_density",
-        "reflective",
-        "foil",
-        "glitter",
-        "neon",
-        "glow",
-        "rubber_print",
-        "water_based",
-        "plastisol",
-    }:
-        if kind == "text":
-            return f"""
-PRINT TEXT REALISM:
-- Make the {application} look physically realistic for the garment material.
-- Keep the text fully readable at normal viewing distance.
-- Apply only mild believable warping over the text area.
-- Preserve realistic lighting, fabric texture, and shadow interaction.
-- Avoid smeared, melted, detached, distorted, or unreadable text.
-- Use strong contrast between text and garment.
+    if app == "screen_print":
+        return (
+            """
+SCREEN PRINT REALISM:
+- Screen print should look like real ink on the surface: crisp edges, opaque coverage, mostly matte finish.
+- Very subtle ink thickness is allowed, but avoid puffy/high-relief effects.
+- No transfer film, no glossy sticker look, no visible carrier edge.
 """.strip()
+            if kind != "text"
+            else """
+SCREEN PRINT TEXT REALISM:
+- Keep the text crisp and fully readable.
+- Screen print should look like matte ink with sharp edges and solid coverage.
+- No glossy carrier film edge; do not make it look like a sticker.
+""".strip()
+        )
 
-        return f"""
-PRINT REALISM:
-- Make the {application} look physically realistic for the garment material.
-- The design must conform to folds, curvature, stretching, and fabric tension.
-- Slightly warp the design with the garment surface in a believable real-world way.
-- Preserve realistic lighting, surface texture, and shadow interaction.
-- Avoid floating, sticker-like, or detached appearance.
+    if app == "dtg":
+        return (
+            """
+DTG REALISM:
+- DTG must look like ink absorbed into fabric fibers (no transfer film).
+- No raised edge, no plastic gloss; soft matte finish.
+- Allow mild fabric-texture show-through and slight natural softening at edges.
 """.strip()
+            if kind != "text"
+            else """
+DTG TEXT REALISM:
+- Keep the text fully readable.
+- DTG should look like ink absorbed into the fibers: no film edge, no thickness, matte finish.
+""".strip()
+        )
+
+    if app == "dtf":
+        return (
+            """
+DTF REALISM:
+- DTF must look like a thin heat-transfer layer with a subtle carrier film.
+- Slight gloss is allowed; show a very subtle edge only if physically plausible.
+- Avoid thick sticker/plastic patch look and avoid large obvious rectangular film borders.
+""".strip()
+            if kind != "text"
+            else """
+DTF TEXT REALISM:
+- Keep the text fully readable.
+- DTF should look like a thin transfer: slight gloss and a subtle edge are ok, but never a thick sticker.
+""".strip()
+        )
+
+    if app == "tampon_print":
+        return (
+            """
+TAMPOPRINT REALISM:
+- Tampoprint (pad printing) must look like a very sharp small print with a thin ink layer.
+- Keep edges crisp and clean; minimal distortion; no fabric-absorption look.
+- Do NOT add embroidery texture, transfer film borders, or raised relief.
+""".strip()
+            if kind != "text"
+            else """
+TAMPOPRINT TEXT REALISM:
+- Keep the text crisp and fully readable.
+- Tampoprint should be a thin sharp ink layer with clean edges (no transfer film, no embroidery).
+""".strip()
+        )
+
+    if app == "decal":
+        return (
+            """
+DECAL REALISM:
+- Decal (overglaze/cold) must look extremely thin and integrated into the surface.
+- Slight gloss is allowed; no fabric-thread/embroidery texture; no raised ink.
+- Avoid obvious sticker borders and avoid thick plastic film appearance.
+""".strip()
+            if kind != "text"
+            else """
+DECAL TEXT REALISM:
+- Keep the text fully readable.
+- Decal should look extremely thin and slightly glossy, integrated into the surface (not embroidered, not absorbed ink).
+""".strip()
+        )
+
+    if app == "engraving":
+        return (
+            """
+LASER ENGRAVING REALISM:
+- Laser engraving must look etched/recessed into the material (no colored ink print).
+- The mark should be tone-on-tone with subtle depth, micro-shadows, and realistic burn/etch shading.
+- Avoid glossy sticker/print appearance; avoid embroidery texture.
+""".strip()
+            if kind != "text"
+            else """
+LASER ENGRAVING TEXT REALISM:
+- Keep the text fully readable.
+- The text must look laser-engraved (etched/recessed), tone-on-tone, with subtle depth/shading; never like printed ink.
+""".strip()
+        )
 
     return f"""
 MATERIAL REALISM:
@@ -573,14 +714,14 @@ COLOR FIDELITY (CRITICAL):
 - Do NOT substitute a nearby shade or recolor it automatically.
 """.strip() if requested_color else ""
 
-    bg_remove = ""
-    if remove_logo_bg:
-        bg_remove = """
+    # Always remove background for logo sources to avoid "white rectangle" artifacts.
+    bg_remove = """
 BACKGROUND REMOVAL (CRITICAL):
-- If image 2 contains a background (solid/gradient/photo/paper/texture), treat it as NOT part of the logo.
-- Cut out the logo cleanly and ignore/remove the background completely (transparent cutout effect).
-- Preserve the logo edges (anti-aliasing) with NO white/black halos and NO leftover background pixels.
-- If the background is clearly an intentional part of the logo artwork (e.g., a badge/shape behind the mark), keep it ONLY if it is part of the visible logo itself.
+- Treat any background in image 2 (solid/gradient/photo/paper/texture) as NOT part of the logo.
+- Cut out the logo cleanly and use ONLY the logo artwork as a transparent cutout.
+- Do NOT place a white/black rectangle, badge, box, or backdrop behind the logo unless it is part of the logo artwork itself.
+- Preserve edges (anti-aliasing) with NO halos and NO leftover background pixels.
+- If image 2 contains an intentional background shape that is clearly part of the logo artwork, keep ONLY that shape (not the surrounding photo/paper).
 """.strip()
 
     base = """
@@ -626,7 +767,9 @@ TEXT FIDELITY (CRITICAL):
 
     requested_color = (source_color or "").strip()
     color_line = f"\n- Keep the logo in EXACTLY this color: {requested_color}. Do NOT revert it." if requested_color else ""
-    bg_line = "\n- Remove/cut out any background from image 2; treat it as transparent." if remove_logo_bg else ""
+    bg_line = (
+        "\n- Remove/cut out any background from image 2; treat it as transparent (no white box, no rectangle, no halo)."
+    )
     return f"""
 LOGO FIDELITY (CRITICAL):
 - Copy the logo from image 2 EXACTLY (shape, colors, spacing, proportions, orientation).
@@ -862,6 +1005,9 @@ def _wants_full_body_framing(scene_mode: str, product_title: str, placement_key:
     key = (placement_key or "").strip()
     if key.startswith("mug_"):
         return False
+    # For chest/front branding, a compact upper-body shot is preferred.
+    if key in {"chest", "front", "belly", "back"}:
+        return False
     return True
 
 def _build_full_body_framing_block() -> str:
@@ -886,6 +1032,8 @@ def _build_compact_framing_hint(scene_mode: str, product_title: str, placement_k
         return " Framing: full-body head-to-toe with face visible; keep the target sleeve closest to camera and clearly readable."
     if key.startswith("mug_"):
         return ""
+    if key == "chest":
+        return " Framing: compact upper-body (head to waist/hips) with face visible; keep the chest area large; do NOT show full-length head-to-toe."
     return " Framing: full-body head-to-toe with face visible; include feet/shoes; do not crop the person."
 
 
@@ -920,6 +1068,7 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     placement_key = _canonicalize_placement(inputs.placement)
     placement = _placement_hint_for_product(inputs.product_title, placement_key)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
+    technique_lock_block = _build_technique_lock_block(inputs.application)
     is_sleeve = placement_key in {"wearer_right_sleeve", "wearer_left_sleeve"}
     full_body_block = _build_full_body_framing_block() if _wants_full_body_framing(inputs.scene_mode, inputs.product_title, placement_key) else ""
     product_scope_lock = _build_product_scope_lock(inputs.product_title)
@@ -927,6 +1076,7 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
 
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
+        technique_hint = _build_compact_technique_hint(inputs.application)
         fidelity = _build_source_fidelity_block_fast(
             inputs.source_kind,
             inputs.source_text,
@@ -968,6 +1118,8 @@ Use image 1 as the product reference. Use image 2 as the exact design source.
 
 TASK:
 Apply the provided design as {application} {placement} on the product in image 1 ("{inputs.product_title}").
+
+{technique_hint}
 
 {fidelity}
 
@@ -1102,6 +1254,8 @@ STRICT EDIT SCOPE:
 
 {overlap_avoidance_block}
 
+{technique_lock_block}
+
 {strict_placement_lock}
 
 {sleeve_extra_lock}
@@ -1131,6 +1285,7 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     placement_key = _canonicalize_placement(inputs.placement)
     placement = _placement_hint_for_product(inputs.product_title, placement_key)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
+    technique_hint = _build_compact_technique_hint(inputs.application)
 
     kind = (inputs.source_kind or "").strip().lower()
     fidelity = ""
@@ -1154,11 +1309,10 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
                 "Do not split it into separate parts or stray letters. "
                 "If it feels too long for the sleeve, scale down the whole logo uniformly instead of cropping or abbreviating it."
             )
-        bg_hint = ""
-        if inputs.remove_logo_bg:
-            bg_hint = (
-                " If image 2 contains a background (solid/gradient/photo/paper/texture), remove/cut it out and use ONLY the logo mark as a clean transparent cutout (no halos)."
-            )
+        bg_hint = (
+            " Remove/cut out any background from image 2 and use ONLY the logo artwork as a clean transparent cutout "
+            "(no white box/rectangle, no badge backdrop unless it is part of the logo, no halos)."
+        )
         fidelity = (
             "Logo must match image 2 EXACTLY (shape, colors, spacing, proportions, orientation). "
             "Do not redraw/clean up. If exact match is not possible, leave area blank."
@@ -1181,6 +1335,7 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     return (
         f"Use image 1 as the base product. Use image 2 as the design source.\n"
         f"TASK: Apply the design as {application} {placement} on the product in image 1 ({inputs.product_title!r}).\n"
+        f"{(technique_hint + chr(10)) if technique_hint else ''}"
         f"{fidelity}\n"
         "EDIT SCOPE: change only what is needed for the application; do not change product color, material, seams, or silhouette.\n"
         "No duplicate placements; do not add extra logos/text.\n"

@@ -18,7 +18,7 @@ const state = {
   selected: null,
   selectedImageUrl: "",
   application: "embroidery",
-  placement: "",
+  placement: "chest",
   mode: "logo", // logo | text
   logoUrl: "",
   removeLogoBg: true,
@@ -34,7 +34,6 @@ const state = {
   kieProvider: "kie_jobs",
   lastTaskJson: null,
   pollTimer: null,
-  tshirtView: "front", // front | back
   sceneMode: "on_model", // on_model | product_only
   speedMode: "quality", // fast | quality
   externalImageProxyBase: "",
@@ -142,10 +141,6 @@ function isApronLike(p) {
   return hay.includes("фартук") || hay.includes("apron");
 }
 
-function isSleevePlacementId(placementId) {
-  return placementId === "wearer_left_sleeve" || placementId === "wearer_right_sleeve";
-}
-
 function resetProductSearch() {
   state.productQuery = "";
   if (state.productSearchTimer) {
@@ -167,7 +162,7 @@ function resetCustomizeState() {
   state.selected = null;
   state.selectedImageUrl = "";
   state.application = "embroidery";
-  state.placement = "";
+  state.placement = "chest";
   state.mode = "logo";
   state.logoUrl = "";
   state.logoColorMode = "original";
@@ -463,7 +458,7 @@ function renderGender() {
       el("div", { class: "col" }, [
         el("div", { class: "subtitle" }, ["Как это работает"]),
         el("div", { class: "hr" }),
-        el("div", { class: "help" }, ["Выберите товар → зону нанесения → добавьте логотип или текст → получите изображение с нанесением."]),
+        el("div", { class: "help" }, ["Выберите товар → выберите вид нанесения → добавьте логотип или текст → получите изображение. Зона нанесения: грудь."]),
       ]),
     ]),
   ]);
@@ -574,7 +569,6 @@ function productCard(p) {
       state.selected = p;
       state.step = "customize";
       state.selectedImageUrl = (p.images && p.images[0]) || "";
-      state.tshirtView = "front";
       state.lastError = "";
       render();
     },
@@ -613,8 +607,12 @@ function renderCustomize() {
             : "Качество: с более детальной постановкой, поэтому обычно дольше.",
         ]),
         el("div", { class: "hr" }),
+        el("label", { class: "subtitle" }, ["Зона нанесения"]),
+        chestPlacementPreview(),
+        el("div", { class: "help" }, ["Доступна только зона “Грудь”."]),
+        el("div", { class: "hr" }),
         el("label", { class: "subtitle" }, ["Вид нанесения"]),
-        applicationSelect(),
+        applicationPicker(),
         el("div", { class: "hr" }),
         el("label", { class: "subtitle" }, ["Дизайн"]),
         modeSwitch(),
@@ -625,29 +623,6 @@ function renderCustomize() {
           class: `btn primary`,
           onclick: () => onGenerate(),
         }, ["Создать визуализацию"]),
-      ]),
-      el("div", { class: "col zones-col", id: "zones-anchor" }, [
-        el("div", { class: "subtitle" }, ["Выберите зону нанесения"]),
-        el("div", { class: "hr" }),
-        isApparel
-          ? el("div", { class: "seg" }, [
-            el("button", {
-              class: `btn small ${state.tshirtView === "front" ? "success" : ""}`,
-              onclick: () => { state.tshirtView = "front"; render(); },
-            }, ["Перед"]),
-            el("button", {
-              class: `btn small ${state.tshirtView === "back" ? "success" : ""}`,
-              onclick: () => { state.tshirtView = "back"; render(); },
-            }, ["Спина"]),
-          ])
-          : el("div", { style: "height: 0px;" }),
-        el("div", { class: "hr" }),
-        el("div", { class: "mock" }, [
-          isApparel ? apparelZonePicker() : (p.type || inferProductType(p)) === "mug" ? mugZones() : genericZones(),
-        ]),
-        el("div", { class: "help" }, [
-          state.placement ? "Зона выбрана" : "Выберите зону, чтобы продолжить.",
-        ]),
       ]),
     ]),
   ]);
@@ -674,52 +649,12 @@ function renderCustomize() {
   return el("div", { class: "layout" }, [left, right]);
 }
 
-function apparelZonePicker() {
-  const center = el("div", { class: "zone-card center" }, [
-    torsoSvg(state.tshirtView === "back" ? "back" : "front"),
-    el("div", { class: "zone-caption" }, [state.tshirtView === "back" ? "Спина" : "Перед"]),
-  ]);
-
-  if (isApronLike(state.selected)) {
-    return el("div", { class: "zone-picker" }, [center]);
-  }
-
-  const sleeveLeft = el("div", { class: "zone-card" }, [
-    sleeveSvg("wearer_left_sleeve"),
-    el("div", { class: "zone-caption" }, ["Левый рукав"]),
-  ]);
-
-  const sleeveRight = el("div", { class: "zone-card" }, [
-    sleeveSvg("wearer_right_sleeve"),
-    el("div", { class: "zone-caption" }, ["Правый рукав"]),
-  ]);
-
-  return el("div", { class: "zone-picker" }, [sleeveLeft, center, sleeveRight]);
+function chestPlacementPreview() {
+  const wrap = el("div", { class: "mock" }, [chestSvg()]);
+  return wrap;
 }
 
-function sleeveSvg(placementId) {
-  const svg = el("svg", { class: "zone-svg", viewBox: "0 0 220 160", preserveAspectRatio: "xMidYMid meet" });
-  // Sleeve outline (simple trapezoid)
-  svg.appendChild(el("path", {
-    d: "M30 30 C55 15, 165 15, 190 30 L205 120 C207 132, 198 142, 186 142 H34 C22 142, 13 132, 15 120 L30 30 Z",
-    fill: "rgba(255,255,255,0.03)",
-    stroke: "rgba(255,255,255,0.16)",
-    "stroke-width": "2",
-  }));
-
-  const g = el("g", { class: "zones" });
-  g.appendChild(el("rect", {
-    class: `zone ${state.placement === placementId ? "selected" : ""}`,
-    // upper sleeve near shoulder
-    x: 56, y: 42, width: 108, height: 58, rx: "10",
-    title: placementId,
-    onclick: () => { state.placement = placementId; render(); },
-  }));
-  svg.appendChild(g);
-  return svg;
-}
-
-function torsoSvg(mode) {
+function chestSvg() {
   const svg = el("svg", { class: "zone-svg", viewBox: "0 0 260 200", preserveAspectRatio: "xMidYMid meet" });
   // T-shirt/sweatshirt simplified outline
   svg.appendChild(el("path", {
@@ -729,34 +664,12 @@ function torsoSvg(mode) {
     "stroke-width": "2",
   }));
 
-  const g = el("g", { class: "zones" });
-  if (mode === "back") {
-    g.appendChild(el("rect", {
-      class: `zone ${state.placement === "back" ? "selected" : ""}`,
-      x: 84, y: 56, width: 92, height: 108, rx: "10",
-      title: "back",
-      onclick: () => { state.placement = "back"; render(); },
-    }));
-  } else {
-    g.appendChild(el("rect", {
-      class: `zone ${state.placement === "chest" ? "selected" : ""}`,
-      x: 92, y: 56, width: 76, height: 38, rx: "10",
-      title: "chest",
-      onclick: () => { state.placement = "chest"; render(); },
-    }));
-    g.appendChild(el("rect", {
-      class: `zone ${state.placement === "front" ? "selected" : ""}`,
-      x: 84, y: 98, width: 92, height: 66, rx: "10",
-      title: "front",
-      onclick: () => { state.placement = "front"; render(); },
-    }));
-    g.appendChild(el("rect", {
-      class: `zone ${state.placement === "belly" ? "selected" : ""}`,
-      x: 92, y: 136, width: 76, height: 28, rx: "10",
-      title: "belly",
-      onclick: () => { state.placement = "belly"; render(); },
-    }));
-  }
+  const g = el("g", { class: "zones", style: "pointer-events:none;" });
+  g.appendChild(el("rect", {
+    class: "zone selected",
+    x: 92, y: 56, width: 76, height: 38, rx: "10",
+    title: "Грудь",
+  }));
   svg.appendChild(g);
   return svg;
 }
@@ -820,40 +733,110 @@ function productPhotosPicker(p) {
   return grid;
 }
 
-function applicationSelect() {
-  const sel = el("select", {
-    onchange: (e) => {
-      state.application = e.target.value;
-    },
-  }, [
-    opt("print", "Принт (print)"),
-    opt("embroidery", "Вышивка (embroidery)"),
-    opt("screen_print", "Шелкография (screen_print)"),
-    opt("dtf", "DTF (dtf)"),
-    opt("dtg", "DTG (dtg)"),
-    opt("heat_transfer", "Термотрансфер (heat_transfer)"),
-    opt("patch", "Нашивка (patch)"),
-    opt("engraving", "Гравировка (engraving)"),
-    opt("sublimation", "Сублимация (sublimation)"),
-    opt("flex", "Флекс (flex)"),
-    opt("flock", "Флок (flock)"),
-    opt("puff_print", "Пухлый принт (puff_print)"),
-    opt("high_density", "Высокая плотность (high_density)"),
-    opt("reflective", "Светоотражающий (reflective)"),
-    opt("foil", "Фольга (foil)"),
-    opt("glitter", "Глиттер (glitter)"),
-    opt("neon", "Неон (neon)"),
-    opt("glow", "Свечение (glow)"),
-    opt("rubber_print", "Резиновый принт (rubber_print)"),
-    opt("water_based", "Водная краска (water_based)"),
-    opt("plastisol", "Пластизоль (plastisol)"),
-  ]);
-  sel.value = state.application;
-  return sel;
+const APPLICATION_METHODS = [
+  { id: "tampon_print", title: "Тампопечать" },
+  { id: "screen_print", title: "Шелкография" },
+  { id: "dtg", title: "DTG", note: "прямая печать на ткани" },
+  { id: "dtf", title: "DTF", note: "термотрансфер" },
+  { id: "decal", title: "Деколь", note: "надглазурная / холодная" },
+  { id: "embroidery", title: "Вышивка" },
+  { id: "engraving", title: "Лазерная гравировка" },
+];
+
+function applicationPicker() {
+  const allowed = new Set(APPLICATION_METHODS.map((m) => m.id));
+  if (!allowed.has(state.application)) state.application = "embroidery";
+
+  return el("div", { class: "app-methods" }, APPLICATION_METHODS.map((m) => {
+    const selected = state.application === m.id;
+    return el("button", {
+      type: "button",
+      class: `app-method ${selected ? "selected" : ""}`,
+      "data-app": m.id,
+      onclick: () => {
+        state.application = m.id;
+        render();
+        warmupCurrentAssets();
+      },
+    }, [
+      applicationIcon(m.id),
+      el("div", { class: "app-text" }, [
+        el("div", { class: "app-title" }, [m.title]),
+        m.note ? el("div", { class: "app-note" }, [m.note]) : el("div", { style: "height:0px;" }),
+      ]),
+    ]);
+  }));
 }
 
-function opt(value, label) {
-  return el("option", { value }, [label]);
+function iconSvg(children = []) {
+  return el("svg", {
+    class: "app-icon",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": "1.8",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true",
+  }, children);
+}
+
+function applicationIcon(id) {
+  switch (id) {
+    case "tampon_print":
+      // Stamp/pad icon
+      return iconSvg([
+        el("path", { d: "M8 10V6a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v4" }),
+        el("rect", { x: "6", y: "10", width: "12", height: "6", rx: "2" }),
+        el("path", { d: "M7 16h10v4H7z" }),
+      ]);
+    case "screen_print":
+      // Screen frame + mesh
+      return iconSvg([
+        el("rect", { x: "4", y: "5", width: "16", height: "12", rx: "2" }),
+        el("path", { d: "M7 8l10 6" }),
+        el("path", { d: "M17 8L7 14" }),
+        el("path", { d: "M8 19h8" }),
+      ]);
+    case "dtg":
+      // Ink drop + garment line
+      return iconSvg([
+        el("path", { d: "M12 3c2.5 3.2 4 5.3 4 7.2a4 4 0 0 1-8 0C8 8.3 9.5 6.2 12 3z" }),
+        el("path", { d: "M7 21h10" }),
+      ]);
+    case "dtf":
+      // Film sheet + press arrow
+      return iconSvg([
+        el("path", { d: "M7 4h7l3 3v13a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" }),
+        el("path", { d: "M14 4v4h4" }),
+        el("path", { d: "M12 10v6" }),
+        el("path", { d: "M9.5 13L12 10l2.5 3" }),
+      ]);
+    case "decal":
+      // Sheet + water wave
+      return iconSvg([
+        el("rect", { x: "6", y: "4", width: "12", height: "16", rx: "2" }),
+        el("path", { d: "M8 14c1-.8 2-.8 3 0s2 .8 3 0 2-.8 2 0" }),
+        el("path", { d: "M8 17c1-.8 2-.8 3 0s2 .8 3 0 2-.8 2 0" }),
+      ]);
+    case "embroidery":
+      // Needle + thread
+      return iconSvg([
+        el("path", { d: "M16 4l4 4" }),
+        el("path", { d: "M18 6L9 15" }),
+        el("path", { d: "M7 17c-2 2-2 4 0 4s4-2 6-4" }),
+      ]);
+    case "engraving":
+      // Laser beam + surface
+      return iconSvg([
+        el("path", { d: "M4 20h16" }),
+        el("path", { d: "M6 20c2-4 10-4 12 0" }),
+        el("path", { d: "M14 4l-4 6" }),
+        el("path", { d: "M17 6l-6 8" }),
+      ]);
+    default:
+      return iconSvg([el("circle", { cx: "12", cy: "12", r: "8" })]);
+  }
 }
 
 function modeSwitch() {
@@ -906,20 +889,9 @@ function logoUploader() {
       }
     },
   });
-  
-  const bgRmWrap = el("div", { style: "display:flex;align-items:center;gap:8px;margin-top:10px;margin-bottom:10px;" }, [
-    el("input", {
-      type: "checkbox",
-      checked: state.removeLogoBg,
-      onchange: (e) => {
-        state.removeLogoBg = e.target.checked;
-      }
-    }),
-    el("span", {}, ["Удалить фон (во время генерации)"])
-  ]);
 
   wrap.appendChild(input);
-  wrap.appendChild(bgRmWrap);
+  wrap.appendChild(el("div", { class: "help" }, ["Фон логотипа удаляется автоматически (без белых прямоугольников/ореолов)."]));
   wrap.appendChild(info);
   wrap.appendChild(warn);
   wrap.appendChild(el("div", { class: "hr" }));
@@ -1003,105 +975,6 @@ function colorPickerControl({ label, value, help = "", onchange }) {
   ]);
 }
 
-function tshirtZones() {
-  const zonesFront = [
-    { id: "wearer_right_sleeve", label: "Правый рукав", x: 260, y: 150, w: 90, h: 75 },
-    { id: "wearer_left_sleeve", label: "Левый рукав", x: 50, y: 150, w: 90, h: 75 },
-    { id: "chest", label: "Грудь", x: 130, y: 185, w: 140, h: 110 },
-    { id: "belly", label: "Живот", x: 130, y: 305, w: 140, h: 120 },
-  ];
-  const zonesBack = [
-    { id: "back", label: "Спина", x: 120, y: 175, w: 160, h: 240 },
-    { id: "wearer_right_sleeve", label: "Правый рукав", x: 260, y: 150, w: 90, h: 75 },
-    { id: "wearer_left_sleeve", label: "Левый рукав", x: 50, y: 150, w: 90, h: 75 },
-  ];
-  const zones = state.tshirtView === "back" ? zonesBack : zonesFront;
-
-  const svg = el("svg", { width: "360", height: "480", viewBox: "0 0 360 480" });
-  svg.appendChild(el("path", {
-    d: "M120 60c20-18 40-28 60-28s40 10 60 28l40 40c18 18 22 42 14 64l-18 48c-4 10-14 16-24 14l-26-6v210c0 22-18 40-40 40H140c-22 0-40-18-40-40V220l-26 6c-10 2-20-4-24-14l-18-48c-8-22-4-46 14-64l40-40z",
-    fill: "rgba(255,255,255,0.06)",
-    stroke: "rgba(255,255,255,0.18)",
-    "stroke-width": "2",
-  }));
-
-  const g = el("g", { class: "zones" });
-  for (const z of zones) {
-    const rect = el("rect", {
-      class: `zone ${state.placement === z.id ? "selected" : ""}`,
-      x: z.x, y: z.y, width: z.w, height: z.h, rx: "10",
-      title: z.label,
-      onclick: () => { state.placement = z.id; render(); },
-    });
-    g.appendChild(rect);
-  }
-  svg.appendChild(g);
-  return svg;
-}
-
-function mugZones() {
-  const zones = [
-    { id: "mug_left", label: "Слева", x: 80, y: 150, w: 90, h: 110 },
-    { id: "mug_wrap", label: "По кругу", x: 95, y: 125, w: 170, h: 160 },
-    { id: "mug_right", label: "Справа", x: 190, y: 150, w: 90, h: 110 },
-  ];
-
-  const svg = el("svg", { width: "360", height: "420", viewBox: "0 0 360 420" });
-  svg.appendChild(el("path", {
-    d: "M110 90h140c12 0 22 10 22 22v200c0 26-22 48-48 48H136c-26 0-48-22-48-48V112c0-12 10-22 22-22z",
-    fill: "rgba(255,255,255,0.06)",
-    stroke: "rgba(255,255,255,0.18)",
-    "stroke-width": "2",
-  }));
-  svg.appendChild(el("path", {
-    d: "M272 150h24c26 0 46 20 46 46s-20 46-46 46h-24v-24h18c14 0 22-10 22-22s-8-22-22-22h-18v-24z",
-    fill: "rgba(255,255,255,0.03)",
-    stroke: "rgba(255,255,255,0.14)",
-    "stroke-width": "2",
-  }));
-
-  const g = el("g", { class: "zones" });
-  for (const z of zones) {
-    g.appendChild(el("rect", {
-      class: `zone ${state.placement === z.id ? "selected" : ""}`,
-      x: z.x, y: z.y, width: z.w, height: z.h, rx: "12",
-      title: z.label,
-      onclick: () => { state.placement = z.id; render(); },
-    }));
-  }
-  svg.appendChild(g);
-  return svg;
-}
-
-function genericZones() {
-  const zones = [
-    { id: "front", label: "Front", x: 96, y: 96, w: 168, h: 140 },
-    { id: "back", label: "Back", x: 96, y: 246, w: 168, h: 74 },
-    { id: "left_side", label: "Left side", x: 58, y: 130, w: 30, h: 150 },
-    { id: "right_side", label: "Right side", x: 272, y: 130, w: 30, h: 150 },
-    { id: "top", label: "Top", x: 110, y: 58, w: 140, h: 28 },
-    { id: "bottom", label: "Bottom", x: 110, y: 328, w: 140, h: 24 },
-  ];
-  const svg = el("svg", { width: "360", height: "360", viewBox: "0 0 360 360" });
-  svg.appendChild(el("rect", {
-    x: 60, y: 40, width: 240, height: 280, rx: "22",
-    fill: "rgba(255,255,255,0.06)",
-    stroke: "rgba(255,255,255,0.18)",
-    "stroke-width": "2",
-  }));
-  const g = el("g", { class: "zones" });
-  for (const z of zones) {
-    g.appendChild(el("rect", {
-      class: `zone ${state.placement === z.id ? "selected" : ""}`,
-      x: z.x, y: z.y, width: z.w, height: z.h, rx: "14",
-      title: z.label,
-      onclick: () => { state.placement = z.id; render(); },
-    }));
-  }
-  svg.appendChild(g);
-  return svg;
-}
-
 function sceneModeSwitch() {
   return el("div", { class: "seg" }, [
     el("button", {
@@ -1138,16 +1011,6 @@ function speedModeSwitch() {
 async function onGenerate() {
   if (!state.selected) return;
   state.lastError = "";
-  if (!state.placement) {
-    alert("Выбери зону нанесения");
-    return;
-  }
-  if (isApronLike(state.selected) && isSleevePlacementId(state.placement)) {
-    state.placement = "";
-    render();
-    alert("Для фартука рукава недоступны. Выбери зону на передней части или спине.");
-    return;
-  }
   if (state.mode === "logo" && !state.logoUrl) {
     alert("Загрузи логотип");
     return;
@@ -1176,7 +1039,7 @@ async function onGenerate() {
     productImageUrl: state.selectedImageUrl || "",
     provider: "kie_jobs",
     model: "wan/2-7-image-pro",
-    placement: state.placement,
+    placement: "chest",
     application: state.application,
     scene_mode: state.sceneMode,
     speed_mode: state.speedMode,
@@ -1190,7 +1053,7 @@ async function onGenerate() {
   if (preparedProductKieUrl) body.productKieUrl = preparedProductKieUrl;
   if (state.mode === "logo") {
     body.logoUrl = state.logoUrl;
-    body.removeLogoBg = !!state.removeLogoBg;
+    body.removeLogoBg = true;
     const logoColor = currentLogoColor();
     if (logoColor) body.logoColor = logoColor;
     const preparedLogoKieUrl = preparedKieUrlFor("logo", currentLogoSourceKey());
@@ -1389,7 +1252,7 @@ function renderResult() {
         render();
       },
     }, ["Сделать ещё"]),
-    el("div", { class: "help" }, ["Можно выбрать другой товар или другую зону нанесения."]),
+    el("div", { class: "help" }, ["Можно выбрать другой товар или поменять дизайн / вид нанесения."]),
   ])]);
 }
 

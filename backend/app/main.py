@@ -940,6 +940,9 @@ async def list_products(
         p = item.data
         if not _has_local_catalog_images(p):
             continue
+        # UI supports only chest placement; restrict catalog to apparel-like items.
+        if str(p.get("type") or "").strip().lower() != "apparel":
+            continue
         p_gender = str(p.get("gender") or "unisex")
         if gender_norm and gender_norm != "all":
             # Unisex items should be visible for both male/female selections.
@@ -1014,8 +1017,39 @@ async def generate(
     """
     product_id = (payload.get("productId") or "").strip()
     product_article = (payload.get("productArticle") or "").strip()
-    placement = (payload.get("placement") or "").strip()
-    application = (payload.get("application") or "embroidery").strip()
+    placement_raw = (payload.get("placement") or "").strip()
+    placement_norm = placement_raw.strip().lower()
+    placement = placement_norm
+    if placement in {"грудь", "grud", "grudi"}:
+        placement = "chest"
+
+    application_raw = (payload.get("application") or "embroidery").strip()
+    application_norm = application_raw.strip().lower()
+    application_aliases = {
+        "тампопечать": "tampon_print",
+        "tampoprint": "tampon_print",
+        "tampography": "tampon_print",
+        "шелкография": "screen_print",
+        "silkscreen": "screen_print",
+        "деколь": "decal",
+        "вышивка": "embroidery",
+        "лазерная гравировка": "engraving",
+        "гравировка": "engraving",
+        "laser_engraving": "engraving",
+    }
+    application = application_aliases.get(application_norm, application_norm)
+    allowed_applications = {
+        "tampon_print",
+        "screen_print",
+        "dtg",
+        "dtf",
+        "decal",
+        "embroidery",
+        "engraving",
+    }
+    if application not in allowed_applications:
+        allowed_text = ", ".join(sorted(allowed_applications))
+        raise HTTPException(status_code=400, detail=f"Unsupported application: {application_raw!r}. Allowed: {allowed_text}")
     # We standardize on 3:4 everywhere (frontend + prompts + upstream).
     image_size = (payload.get("image_size") or payload.get("imageSize") or "3:4").strip() or "3:4"
     scene_mode = (payload.get("scene_mode") or payload.get("sceneMode") or "on_model").strip()
@@ -1043,6 +1077,8 @@ async def generate(
         raise HTTPException(status_code=400, detail="productId or productArticle is required")
     if not placement:
         raise HTTPException(status_code=400, detail="placement is required")
+    if placement != "chest":
+        raise HTTPException(status_code=400, detail="Only chest placement is supported (placement=chest)")
 
     lookup = product_id or product_article
     catalog = _get_product_catalog()
@@ -1100,15 +1136,8 @@ async def generate(
         source_kind=source_kind,
         source_text=text_value if source_kind == "text" else "",
         source_color=text_color if source_kind == "text" else logo_color,
-        remove_logo_bg=(
-            source_kind == "logo"
-            and bool(
-                payload.get("removeLogoBg")
-                or payload.get("remove_logo_bg")
-                or payload.get("logoRemoveBg")
-                or payload.get("logo_remove_bg")
-            )
-        ),
+        # Always remove logo background to avoid "white box" / "sticker rectangle" artifacts.
+        remove_logo_bg=(source_kind == "logo"),
         speed_mode=speed_mode,
     )
     if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:

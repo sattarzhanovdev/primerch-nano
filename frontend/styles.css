@@ -208,6 +208,64 @@ input[type="file"].input {
   cursor: pointer;
 }
 
+/* ─── Application methods ─────────────────────────────── */
+.app-methods {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.app-method {
+  appearance: none;
+  border: 1px solid var(--line-hi);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text);
+  border-radius: var(--radius-lg);
+  padding: 12px 12px;
+  text-align: left;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  cursor: pointer;
+  transition: border-color 120ms, background 120ms, transform 80ms;
+  min-height: 54px;
+}
+
+.app-method:hover {
+  border-color: rgba(255,255,255,0.24);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.app-method:active { transform: scale(0.99); }
+
+.app-method.selected {
+  border-color: rgba(245,196,0,0.8);
+  background: rgba(245,196,0,0.08);
+}
+
+.app-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  opacity: 0.92;
+}
+
+.app-text { min-width: 0; }
+
+.app-title {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+.app-note {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 3px;
+  line-height: 1.25;
+}
+
 .color-control {
   display: grid;
   gap: 8px;
