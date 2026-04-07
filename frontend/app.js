@@ -36,10 +36,10 @@ const state = {
   pollTimer: null,
   tshirtView: "front", // front | back
   sceneMode: "on_model", // on_model | product_only
-  speedMode: "fast", // fast | quality
+  speedMode: "quality", // fast | quality
   externalImageProxyBase: "",
   imageProxyEnabled: true,
-  resolution: "720p",
+  resolution: "2K",
   configLoaded: false,
   generateStartedAt: 0,
   progressExpectedMs: 0,
@@ -893,9 +893,6 @@ function logoUploader() {
       try {
         const form = new FormData();
         form.append("file", file);
-        if (state.removeLogoBg) {
-          form.append("remove_bg", "true");
-        }
         const res = await fetch("/api/uploads", { method: "POST", body: form });
         const text = await res.text();
         if (!res.ok) throw new Error(`Upload failed: ${res.status} ${text}`);
@@ -918,7 +915,7 @@ function logoUploader() {
         state.removeLogoBg = e.target.checked;
       }
     }),
-    el("span", {}, ["Удалить фон (ИИ)"])
+    el("span", {}, ["Удалить фон (во время генерации)"])
   ]);
 
   wrap.appendChild(input);
@@ -1193,6 +1190,7 @@ async function onGenerate() {
   if (preparedProductKieUrl) body.productKieUrl = preparedProductKieUrl;
   if (state.mode === "logo") {
     body.logoUrl = state.logoUrl;
+    body.removeLogoBg = !!state.removeLogoBg;
     const logoColor = currentLogoColor();
     if (logoColor) body.logoColor = logoColor;
     const preparedLogoKieUrl = preparedKieUrlFor("logo", currentLogoSourceKey());
