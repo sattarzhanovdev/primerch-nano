@@ -12,7 +12,7 @@ from .storage import uploads_dir
 
 _TEXT_RENDER_LOCK = RLock()
 _TEXT_RENDER_CACHE: dict[str, Path] = {}
-_TEXT_RENDER_VERSION = "v6"
+_TEXT_RENDER_VERSION = "v7"
 _FONT_CANDIDATES = (
     "DejaVuSans-Bold.ttf",
     "DejaVuSans.ttf",
@@ -211,6 +211,11 @@ def render_text_png(
         margin_y = max(padding * 2, int(img.size[1] * 0.35))
         canvas_w = max(min_width, img.size[0] + margin_x * 2)
         canvas_h = max(min_height, 280, img.size[1] + margin_y * 2)
+    elif layout == "chest_wordmark":
+        margin_x = max(padding * 3, int(img.size[0] * 0.16))
+        margin_y = max(padding * 2, int(img.size[1] * 0.55))
+        canvas_w = max(min_width, img.size[0] + margin_x * 2)
+        canvas_h = max(min_height, 320, img.size[1] + margin_y * 2)
     else:
         margin = max(padding * 2, int(max(img.size) * 0.4))
         canvas_w = max(min_width, img.size[0] + margin * 2)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import secrets
@@ -20,7 +21,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .color_utils import normalize_hex_color
 from .kie import (
@@ -32,7 +33,13 @@ from .kie import (
     parse_result_json,
 )
 from .image_refs import optimize_logo_reference
-from .prompts import PromptInputs, build_gpt_image_prompt, build_nanobanana_prompt
+from .placement_guides import build_product_placement_guide, safe_print_box_ratios
+from .prompts import (
+    PromptInputs,
+    build_gpt_image_prompt,
+    build_nanobanana_prompt,
+    has_center_front_obstacles,
+)
 from .config import settings
 from .kie_cache import KieUploadCache
 from .storage import build_file_url, repo_root, save_upload_image, uploads_dir
@@ -118,6 +125,68 @@ def _local_app_file_path(source_url: str, *, server_base: str = "") -> Path | No
         rel = src.split("/assets/", 1)[1]
         return _safe_join_under(_frontend_dir() / "assets", rel)
     return None
+
+
+async def _load_image_from_source(source_url: str, *, server_base: str = "") -> Image.Image:
+    src = (source_url or "").strip()
+    if not src:
+        raise HTTPException(status_code=400, detail="source_url is required")
+
+    blob: bytes | None = None
+    local = _local_app_file_path(src, server_base=server_base)
+    if local and local.exists():
+        blob = local.read_bytes()
+    elif is_public_http_url(src):
+        client = get_http_client()
+        res = await client.get(src, timeout=30, follow_redirects=True)
+        res.raise_for_status()
+        blob = res.content
+
+    if not blob:
+        raise HTTPException(status_code=400, detail=f"Unable to load image source: {src}")
+
+    img = Image.open(io.BytesIO(blob))
+    img.load()
+    return ImageOps.exif_transpose(img)
+
+
+def _save_generated_png(request: Request, img: Image.Image, *, prefix: str, signature: str) -> str:
+    filename = f"{prefix}_{signature}.png"
+    path = uploads_dir() / filename
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(path, format="PNG", optimize=True)
+    return build_file_url(request, f"/uploads/{filename}")
+
+
+async def _build_placement_guide_url(
+    request: Request,
+    *,
+    product_image_url: str,
+    product_title: str,
+    placement: str,
+) -> str:
+    if (placement or "").strip() != "chest":
+        return ""
+
+    img = await _load_image_from_source(product_image_url, server_base=_server_base_url(request))
+    guide = build_product_placement_guide(img, product_title=product_title, placement=placement)
+    if guide is None:
+        return ""
+
+    signature = hashlib.sha1(
+        "\n".join(
+            [
+                "placement-guide-v1",
+                product_image_url,
+                product_title,
+                placement,
+                str(img.size[0]),
+                str(img.size[1]),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+    return _save_generated_png(request, guide, prefix="placement_guide", signature=signature)
 
 
 @dataclass(frozen=True)
@@ -700,6 +769,41 @@ def _is_sleeve_placement(placement: str) -> bool:
     }
 
 
+def _bbox_from_ratios(
+    width: int,
+    height: int,
+    *,
+    left: float,
+    top: float,
+    right: float,
+    bottom: float,
+) -> list[int]:
+    x1 = max(0, min(width - 1, int(round(width * left))))
+    y1 = max(0, min(height - 1, int(round(height * top))))
+    x2 = max(x1 + 1, min(width, int(round(width * right))))
+    y2 = max(y1 + 1, min(height, int(round(height * bottom))))
+    return [x1, y1, x2, y2]
+
+
+def _wan_product_boxes_for_product(
+    *,
+    product_title: str,
+    placement: str,
+    image_size: tuple[int, int],
+) -> list[list[int]]:
+    if (placement or "").strip() != "chest":
+        return []
+
+    width, height = image_size
+    if width <= 1 or height <= 1:
+        return []
+
+    boxes: list[list[int]] = []
+    for left, top, right, bottom in safe_print_box_ratios(product_title, placement):
+        boxes.append(_bbox_from_ratios(width, height, left=left, top=top, right=right, bottom=bottom))
+    return boxes
+
+
 def _breadcrumbs_to_category(breadcrumbs: Any) -> str:
     if not breadcrumbs:
         return ""
@@ -1092,6 +1196,17 @@ async def generate(
     product_kie_url_hint = (
         (payload.get("productKieUrl") or payload.get("product_kie_url") or "").strip()
     )
+    placement_guide_url = ""
+    if scene_mode.strip().lower() == "product_only":
+        try:
+            placement_guide_url = await _build_placement_guide_url(
+                request,
+                product_image_url=product_image_url,
+                product_title=_product_prompt_title(product),
+                placement=placement,
+            )
+        except Exception:
+            placement_guide_url = ""
 
     logo_url = (payload.get("logoUrl") or "").strip()
     logo_kie_url_hint = (payload.get("logoKieUrl") or payload.get("logo_kie_url") or "").strip()
@@ -1121,6 +1236,16 @@ async def generate(
                 "min_height": 280,
                 "layout": "sleeve_wordmark",
             })
+        else:
+            render_kwargs.update({
+                "width": 1800,
+                "height": 560,
+                "padding": 24,
+                "font_size": 220,
+                "min_width": 960,
+                "min_height": 320,
+                "layout": "chest_wordmark",
+            })
         path = render_text_png(text_value, **render_kwargs)
         logo_url = build_file_url(request, f"/uploads/{path.name}")
     elif logo_url:
@@ -1139,6 +1264,7 @@ async def generate(
         # Always remove logo background to avoid "white box" / "sticker rectangle" artifacts.
         remove_logo_bg=(source_kind == "logo"),
         speed_mode=speed_mode,
+        has_placement_guide=bool(placement_guide_url),
     )
     if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:
         prompt = build_gpt_image_prompt(prompt_inputs)
@@ -1171,13 +1297,17 @@ async def generate(
     async def _submit_upstream(
         prepared_product_kie_url: str,
         prepared_logo_kie_url: str,
+        prepared_guide_kie_url: str,
         submit_payload: Dict[str, Any],
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
         raw_speed = str(submit_payload.get("speed_mode") or submit_payload.get("speedMode") or "").strip().lower()
         is_fast = raw_speed in {"fast", "speed", "turbo"}
+        input_urls = [prepared_product_kie_url, prepared_logo_kie_url]
+        if prepared_guide_kie_url:
+            input_urls.append(prepared_guide_kie_url)
         if submit_payload["provider"] == "kie_gpt4o_image":
             kie_payload = {
-                "filesUrl": [prepared_product_kie_url, prepared_logo_kie_url],
+                "filesUrl": input_urls,
                 "prompt": submit_payload["prompt"],
                 "size": submit_payload.get("size") or _map_to_gpt4o_size(submit_payload.get("image_size") or ""),
                 **({"callBackUrl": submit_payload.get("callBackUrl")} if submit_payload.get("callBackUrl") else {}),
@@ -1208,7 +1338,7 @@ async def generate(
                 "quality": raw_quality,
             }
             if model_name == "gpt-image/1.5-image-to-image":
-                gie_input["input_urls"] = [prepared_product_kie_url, prepared_logo_kie_url]
+                gie_input["input_urls"] = input_urls
 
             gie_payload: Dict[str, Any] = {
                 "model": model_name,
@@ -1222,14 +1352,20 @@ async def generate(
         if model_name in {"wan/2-7-image", "wan/2-7-image-pro"}:
             default_resolution = "1K" if is_fast else "2K"
             requested_resolution = str(submit_payload.get("resolution") or default_resolution).strip() or default_resolution
-            # For multi-image inputs, provide an empty bbox list per image.
-            bbox_list: list[list[list[int]]] = [[] for _ in range(2)]
+            product_boxes = _wan_product_boxes_for_product(
+                product_title=str(submit_payload.get("productTitle") or ""),
+                placement=str(submit_payload.get("placement") or ""),
+                image_size=(540, 720),
+            )
+            bbox_list: list[list[list[int]]] = [[] for _ in range(len(input_urls))]
+            if bbox_list:
+                bbox_list[0] = product_boxes
             wan_payload: Dict[str, Any] = {
                 "model": model_name,
                 **({"callBackUrl": submit_payload.get("callBackUrl")} if submit_payload.get("callBackUrl") else {}),
                 "input": {
                     "prompt": submit_payload["prompt"],
-                    "input_urls": [prepared_product_kie_url, prepared_logo_kie_url],
+                    "input_urls": input_urls,
                     "n": int(submit_payload.get("numImages") or 1),
                     "enable_sequential": not is_fast,
                     "resolution": _upstream_resolution_for(requested_resolution),
@@ -1247,13 +1383,13 @@ async def generate(
             **({"callBackUrl": submit_payload.get("callBackUrl")} if submit_payload.get("callBackUrl") else {}),
             # Some KIE jobs/createTask variants expect these at the top level.
             "prompt": submit_payload["prompt"],
-            "filesUrl": [prepared_product_kie_url, prepared_logo_kie_url],
+            "filesUrl": input_urls,
             "input": {
                 "prompt": submit_payload["prompt"],
                 # KIE payload formats differ by model/version; send both keys for maximum compatibility.
-                "image_input": [prepared_product_kie_url, prepared_logo_kie_url],
-                "image_urls": [prepared_product_kie_url, prepared_logo_kie_url],
-                "filesUrl": [prepared_product_kie_url, prepared_logo_kie_url],
+                "image_input": input_urls,
+                "image_urls": input_urls,
+                "filesUrl": input_urls,
                 "aspect_ratio": submit_payload.get("image_size") or "3:4",
                 "image_size": submit_payload.get("image_size") or "3:4",
                 "resolution": _upstream_resolution_for(str(submit_payload.get("resolution") or "1K")),
@@ -1274,6 +1410,7 @@ async def generate(
         try:
             model_name = str(job_payload.get("model") or "").strip()
             product_source_url = str(job_payload["productImageUrl"])
+            guide_source_url = str(job_payload.get("placementGuideUrl") or "")
             if model_name in {"wan/2-7-image", "wan/2-7-image-pro"}:
                 product_source_url = await _transform_input_image_to_upload_url(
                     product_source_url,
@@ -1281,8 +1418,15 @@ async def generate(
                     target_aspect="3:4",
                     max_height=720,
                 )
+                if guide_source_url:
+                    guide_source_url = await _transform_input_image_to_upload_url(
+                        guide_source_url,
+                        server_base=server_base,
+                        target_aspect="3:4",
+                        max_height=720,
+                    )
 
-            product_kie_url, logo_kie_url = await asyncio.gather(
+            product_kie_url, logo_kie_url, guide_kie_url = await asyncio.gather(
                 _resolve_kie_asset_url(
                     product_source_url,
                     server_base=server_base,
@@ -1293,8 +1437,12 @@ async def generate(
                     server_base=server_base,
                     prepared_url=job_payload.get("logoKieUrl") or "",
                 ),
+                _resolve_kie_asset_url(
+                    guide_source_url,
+                    server_base=server_base,
+                ) if guide_source_url else asyncio.sleep(0, result=""),
             )
-            kie_payload, res = await _submit_upstream(product_kie_url, logo_kie_url, job_payload)
+            kie_payload, res = await _submit_upstream(product_kie_url, logo_kie_url, guide_kie_url, job_payload)
             tid = _extract_task_id(res)
             job.kie_task_id = tid
             job.state = "submitted" if tid else "failed"
@@ -1314,7 +1462,10 @@ async def generate(
     submit_payload = {
         "prompt": prompt,
         "productImageUrl": product_image_url,
+        "productTitle": prompt_inputs.product_title,
         "logoUrl": logo_url,
+        "placementGuideUrl": placement_guide_url,
+        "placement": placement,
         "callBackUrl": call_back_url,
         "image_size": "3:4",
         "resolution": "720p",
@@ -1326,6 +1477,7 @@ async def generate(
         "size": gpt4o_size,
         "productKieUrl": product_kie_url_hint,
         "logoKieUrl": logo_kie_url_hint,
+        "placementGuideKieUrl": "",
     }
 
     # If assets are already prepared, submit directly and return the real KIE task id immediately.
@@ -1333,6 +1485,8 @@ async def generate(
     if settings.GENERATE_ASYNC and can_submit_direct:
         server_base = _server_base_url(request)
         product_kie_url_direct = product_kie_url_hint
+        guide_source_url = placement_guide_url
+        guide_kie_url_direct = ""
         if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:
             product_source_url = await _transform_input_image_to_upload_url(
                 product_image_url,
@@ -1345,8 +1499,20 @@ async def generate(
                 server_base=server_base,
                 prepared_url=product_kie_url_hint,
             )
+            if guide_source_url:
+                guide_source_url = await _transform_input_image_to_upload_url(
+                    guide_source_url,
+                    server_base=server_base,
+                    target_aspect="3:4",
+                    max_height=720,
+                )
+        if guide_source_url:
+            guide_kie_url_direct = await _resolve_kie_asset_url(
+                guide_source_url,
+                server_base=server_base,
+            )
 
-        kie_payload, res = await _submit_upstream(product_kie_url_direct, logo_kie_url_hint, submit_payload)
+        kie_payload, res = await _submit_upstream(product_kie_url_direct, logo_kie_url_hint, guide_kie_url_direct, submit_payload)
         direct_task_id = _extract_task_id(res)
         if direct_task_id:
             _task_transform_store[direct_task_id] = {
@@ -1374,6 +1540,7 @@ async def generate(
     # Fallback sync mode (not recommended for strict latency).
     server_base = _server_base_url(request)
     product_source_url = product_image_url
+    guide_source_url = placement_guide_url
     if kie_model in {"wan/2-7-image", "wan/2-7-image-pro"}:
         product_source_url = await _transform_input_image_to_upload_url(
             product_source_url,
@@ -1381,8 +1548,15 @@ async def generate(
             target_aspect="3:4",
             max_height=720,
         )
+        if guide_source_url:
+            guide_source_url = await _transform_input_image_to_upload_url(
+                guide_source_url,
+                server_base=server_base,
+                target_aspect="3:4",
+                max_height=720,
+            )
 
-    product_kie_url, logo_kie_url = await asyncio.gather(
+    product_kie_url, logo_kie_url, guide_kie_url = await asyncio.gather(
         _resolve_kie_asset_url(
             product_source_url,
             server_base=server_base,
@@ -1393,9 +1567,13 @@ async def generate(
             server_base=server_base,
             prepared_url=logo_kie_url_hint,
         ),
+        _resolve_kie_asset_url(
+            guide_source_url,
+            server_base=server_base,
+        ) if guide_source_url else asyncio.sleep(0, result=""),
     )
 
-    kie_payload, res = await _submit_upstream(product_kie_url, logo_kie_url, submit_payload)
+    kie_payload, res = await _submit_upstream(product_kie_url, logo_kie_url, guide_kie_url, submit_payload)
 
     sync_task_id = _extract_task_id(res)
     if sync_task_id:

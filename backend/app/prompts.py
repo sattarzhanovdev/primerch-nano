@@ -16,6 +16,18 @@ class PromptInputs:
     source_color: str = ""  # used when a custom text/logo color is requested
     remove_logo_bg: bool = False  # if True, model must cut out logo from its background
     speed_mode: str = "quality"  # quality | fast
+    has_placement_guide: bool = False
+
+
+def _detect_text_scripts(text: str) -> set[str]:
+    scripts: set[str] = set()
+    for ch in text or "":
+        code = ord(ch)
+        if "A" <= ch <= "Z" or "a" <= ch <= "z":
+            scripts.add("latin")
+        elif 0x0400 <= code <= 0x04FF or 0x0500 <= code <= 0x052F:
+            scripts.add("cyrillic")
+    return scripts
 
 
 PLACEMENT_HINTS: dict[str, str] = {
@@ -166,6 +178,30 @@ def _is_headwear_product(product_title: str) -> bool:
     )
     return any(marker in hay for marker in markers)
 
+def has_center_front_obstacles(product_title: str) -> bool:
+    hay = (product_title or "").strip().lower()
+    markers = (
+        "hoodie",
+        "zip hoodie",
+        "jacket",
+        "raincoat",
+        "polo shirt",
+        "shirt",
+        "anorak",
+        "parka",
+        "cardigan",
+        "худи",
+        "толстовк",
+        "куртк",
+        "ветров",
+        "дождев",
+        "поло",
+        "рубаш",
+        "кардиган",
+        "парка",
+    )
+    return any(marker in hay for marker in markers)
+
 def _placement_hint_for_product(product_title: str, placement_key: str) -> str:
     key = (placement_key or "").strip()
     base = PLACEMENT_HINTS.get(key, key)
@@ -181,6 +217,11 @@ def _placement_hint_for_product(product_title: str, placement_key: str) -> str:
             return "on the RIGHT SIDE panel of the cap, centered"
         if key == "top":
             return "on the TOP crown area of the cap, centered"
+    if key == "chest" and has_center_front_obstacles(product_title):
+        return (
+            "on one clean upper chest panel, slightly off-center, fully away from the center line, "
+            "zipper/placket, hood opening, and hanging drawstrings"
+        )
     return base
 
 def _build_product_scope_lock(product_title: str) -> str:
@@ -218,6 +259,11 @@ def _build_overlap_avoidance_block(product_title: str, placement_key: str) -> st
             "- Keep the design inside one flat torso panel with clear margins from the collar, neckline, shoulder seams, side seams, hem, placket, hood opening, and cuffs.",
             "- Do NOT place the design on or across a pocket, kangaroo pocket, zipper, button placket, drawstring, or ribbed waistband.",
         ])
+        if key == "chest" and has_center_front_obstacles(product_title):
+            lines.extend([
+                "- If the product has a center zipper/placket or hanging hood drawstrings, place the design fully on ONE upper chest panel to the side of those details.",
+                "- Never center the design between the drawstrings or across the front closure line.",
+            ])
     elif key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
         lines.extend([
             "- Keep the design fully inside the sleeve panel and away from the shoulder seam, armhole seam, cuff, and any panel boundary.",
@@ -249,7 +295,76 @@ def _build_compact_overlap_avoidance_hint(product_title: str, placement_key: str
         return hint + " Mug only: stay on the mug body, not the handle, rim, or base."
     if _is_headwear_product(product_title):
         return hint + " Headwear only: avoid brim edges, eyelets, panel seams, and back strap/closure."
+    if key == "chest" and has_center_front_obstacles(product_title):
+        return (
+            hint
+            + " If the garment has a zipper/placket or hanging drawstrings, keep the design on a single upper chest panel beside them, never across the center line."
+        )
     return hint
+
+
+def _build_foreground_occlusion_block(product_title: str, placement_key: str) -> str:
+    key = (placement_key or "").strip()
+    if key not in {"chest", "front", "belly", "back"}:
+        return ""
+
+    if not has_center_front_obstacles(product_title) and "hoodie" not in (product_title or "").lower():
+        return """
+FOREGROUND OCCLUSION (CRITICAL):
+- Treat any foreground garment details that pass in front of the placement area as being ABOVE the design.
+- If a seam, flap, fold edge, strap, or hardware crosses the design area, it must remain visible on top and naturally occlude the design.
+- The design must never overwrite or erase garment construction details.
+""".strip()
+
+    return """
+FOREGROUND OCCLUSION (CRITICAL):
+- The design is printed on the fabric surface UNDER existing garment details, not on top of them.
+- Drawstrings, zipper teeth, zipper pull, placket edges, hood opening edges, seam ridges, pocket edges, folds, and shadows must stay fully visible ABOVE the design.
+- If any of those foreground details cross the placement area, they must naturally occlude/hide the covered part of the design.
+- Never paint, replace, blur, erase, or flatten those foreground details to make room for the design.
+- The design may be partially hidden by those objects; that is correct. The objects must stay on top.
+""".strip()
+
+
+def _build_compact_foreground_occlusion_hint(product_title: str, placement_key: str) -> str:
+    key = (placement_key or "").strip()
+    if key not in {"chest", "front", "belly", "back"}:
+        return ""
+    if has_center_front_obstacles(product_title) or "hoodie" in (product_title or "").lower():
+        return (
+            " Foreground details such as drawstrings, zipper/placket, seam ridges, pocket edges, folds, and shadows must remain ABOVE the design and occlude it naturally."
+        )
+    return (
+        " Any foreground garment detail crossing the placement must remain visible on top of the design and occlude it naturally."
+    )
+
+
+def _build_placement_guide_block(has_placement_guide: bool, placement_key: str) -> str:
+    if not has_placement_guide:
+        return ""
+    key = (placement_key or "").strip()
+    if key not in {"chest", "front", "belly", "back"}:
+        return ""
+    return """
+PLACEMENT GUIDE IMAGE (CRITICAL):
+- Image 3 is a placement guide only.
+- Green-marked area = the ONLY allowed printable fabric for the design.
+- Red-marked zones = forbidden garment details / foreground objects.
+- Place the entire design fully inside the green area from image 3.
+- Do NOT move the design into any red-marked zone.
+- Do NOT copy any green/red overlays, guide boxes, marks, or annotations from image 3 into the final output.
+""".strip()
+
+
+def _build_compact_placement_guide_hint(has_placement_guide: bool, placement_key: str) -> str:
+    if not has_placement_guide:
+        return ""
+    key = (placement_key or "").strip()
+    if key not in {"chest", "front", "belly", "back"}:
+        return ""
+    return (
+        " Image 3 is a placement guide only: keep the whole design inside the green zone, avoid all red-marked zones, and never copy the guide markings into the output."
+    )
 
 
 def _build_model_framing_block(product_title: str, placement_key: str) -> str:
@@ -645,6 +760,7 @@ def _build_source_fidelity_block(
     if (source_kind or "").strip().lower() == "text":
         st = (source_text or "").strip()
         requested_color = (source_color or "").strip()
+        scripts = _detect_text_scripts(st)
         char_lock = ""
         compact = "".join(ch for ch in st if not ch.isspace())
         if compact and len(compact) <= 12:
@@ -654,6 +770,25 @@ CHARACTER LOCK (CRITICAL):
 - The text has EXACTLY {len(compact)} characters.
 - Characters in order: {quoted_chars}.
 - Do NOT omit, merge, replace, or reorder any character.
+""".strip()
+        script_lock = ""
+        if scripts == {"latin"}:
+            script_lock = """
+SCRIPT LOCK (CRITICAL):
+- Use LATIN letters only.
+- Do NOT transliterate, substitute, or replace any letter with a Cyrillic lookalike.
+""".strip()
+        elif scripts == {"cyrillic"}:
+            script_lock = """
+SCRIPT LOCK (CRITICAL):
+- Use CYRILLIC letters only.
+- Do NOT transliterate, substitute, or replace any letter with a Latin lookalike.
+""".strip()
+        elif scripts == {"latin", "cyrillic"}:
+            script_lock = """
+SCRIPT LOCK (CRITICAL):
+- Preserve the exact mixed Latin/Cyrillic character sequence from the source.
+- Do NOT normalize the word into a single alphabet and do NOT substitute lookalike letters.
 """.strip()
         color_block = f"""
 COLOR & VISIBILITY:
@@ -673,6 +808,8 @@ COLOR & VISIBILITY:
         return f"""
 STRICT TEXT FIDELITY (CRITICAL):
 - The text to apply is EXACTLY: "{st}"
+- Treat image 2 as the exact authoritative wordmark artwork for this text.
+- Copy the visible glyph shapes from image 2; do NOT re-type or reinterpret the word from scratch.
 - Every letter must be correct, readable, and clearly recognizable.
 - The word must read exactly as "{st}" with no deviations.
 
@@ -685,11 +822,14 @@ TEXT STYLE:
 TEXT RULES:
 - Preserve exact spelling, casing, spacing, and proportions.
 - Do NOT modify, stylize, reinterpret, paraphrase, or distort the text.
+- Do NOT switch alphabet/script, do NOT transliterate, and do NOT replace letters with lookalike characters from another alphabet.
 - Do NOT generate fake letters or approximate letter-like shapes.
 - Do NOT merge letters into abstract forms.
 - The text must be fully legible at normal viewing distance.
 
 {char_lock}
+
+{script_lock}
 
 {color_block}
 
@@ -752,17 +892,27 @@ def _build_source_fidelity_block_fast(
     if kind == "text":
         text = (source_text or "").strip()
         requested_color = (source_color or "").strip()
+        scripts = _detect_text_scripts(text)
         color_line = f"\n- Use EXACTLY this text color: {requested_color}." if requested_color else ""
         compact = "".join(ch for ch in text if not ch.isspace())
         char_line = ""
         if compact and len(compact) <= 12:
             quoted_chars = ", ".join(f'"{ch}"' for ch in compact)
             char_line = f"\n- Exact character order: {quoted_chars}. Do not omit or replace any character."
+        script_line = ""
+        if scripts == {"latin"}:
+            script_line = " Use LATIN letters only; never substitute Cyrillic lookalikes."
+        elif scripts == {"cyrillic"}:
+            script_line = " Use CYRILLIC letters only; never substitute Latin lookalikes."
+        elif scripts == {"latin", "cyrillic"}:
+            script_line = " Preserve the exact mixed Latin/Cyrillic sequence; do not normalize or transliterate it."
         return f"""
 TEXT FIDELITY (CRITICAL):
 - Render EXACTLY this text: {text!r}
+- Treat image 2 as the exact wordmark artwork; copy it rather than re-typing it.
 - Preserve spelling, casing, spacing, and order.
 - Keep it fully legible; no stylization that breaks letters.{color_line}{char_line}
+- Do NOT change alphabet/script, transliterate, or substitute lookalike letters between Cyrillic and Latin.{script_line}
 """.strip()
 
     requested_color = (source_color or "").strip()
@@ -783,6 +933,8 @@ def _build_no_invention_block(source_kind: str) -> str:
         return """
 NO-INVENTION RULE (CRITICAL):
 - Edit only what is required to place the provided text.
+- Treat image 2 as the source artwork for the wordmark itself.
+- Do NOT re-type, transliterate, or "correct" the word into another alphabet or casing.
 - Do NOT invent new letters, words, symbols, decorations, textures, logos, or branding.
 - If the text cannot be preserved exactly, keep the application area blank rather than inventing approximate text.
 - Do NOT add any extra elements to "improve" the result.
@@ -829,6 +981,9 @@ def _build_negative_block(source_kind: str) -> str:
             "- fake typography",
             "- corrupted text",
             "- mirrored text",
+            "- wrong alphabet/script",
+            "- Cyrillic/Latin lookalike substitutions",
+            "- wrong casing",
             "- unreadable lettering",
             "- extra words",
             "- misspellings",
@@ -1073,6 +1228,8 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     full_body_block = _build_full_body_framing_block() if _wants_full_body_framing(inputs.scene_mode, inputs.product_title, placement_key) else ""
     product_scope_lock = _build_product_scope_lock(inputs.product_title)
     overlap_avoidance_block = _build_overlap_avoidance_block(inputs.product_title, placement_key)
+    foreground_occlusion_block = _build_foreground_occlusion_block(inputs.product_title, placement_key)
+    placement_guide_block = _build_placement_guide_block(inputs.has_placement_guide, placement_key)
 
     if (inputs.speed_mode or "").strip().lower() == "fast":
         # Ultra-compact prompt to reduce model overhead and speed up generation.
@@ -1091,6 +1248,8 @@ def build_nanobanana_prompt(inputs: PromptInputs) -> str:
         focus = _build_focus_block(placement_key) if is_sleeve else ""
         scene = _build_fast_scene_block(inputs.scene_mode, inputs.model_gender, inputs.product_title, placement_key)
         overlap_hint = _build_compact_overlap_avoidance_hint(inputs.product_title, placement_key)
+        occlusion_hint = _build_compact_foreground_occlusion_hint(inputs.product_title, placement_key)
+        guide_hint = _build_compact_placement_guide_hint(inputs.has_placement_guide, placement_key)
         garment_lock = """
 GARMENT LOCK (CRITICAL):
 - Keep the garment/product EXACTLY the same as the first image.
@@ -1114,7 +1273,7 @@ LOGO PRIORITY (CRITICAL):
 """.strip()
 
         return f"""
-Use image 1 as the product reference. Use image 2 as the exact design source.
+Use image 1 as the product reference. Use image 2 as the exact design source.{(' Use image 3 as a placement guide only.' if inputs.has_placement_guide else '')}
 
 TASK:
 Apply the provided design as {application} {placement} on the product in image 1 ("{inputs.product_title}").
@@ -1148,6 +1307,10 @@ Apply the provided design as {application} {placement} on the product in image 1
 {scene}
 
 {overlap_hint}
+
+{occlusion_hint}
+
+{guide_hint}
 
 - Photorealistic ecommerce studio photo.
 - Output aspect ratio: {inputs.aspect_ratio}.
@@ -1208,7 +1371,7 @@ SLEEVE-ONLY OUTPUT (CRITICAL):
 """.strip()
 
     return f"""
-Use the first image as the base product reference and the second image as the source design.
+Use the first image as the base product reference and the second image as the source design.{(' Use image 3 as a placement guide only.' if inputs.has_placement_guide else '')}
 
 TASK:
 Apply the design from the second image EXACTLY as provided as {application} {placement}
@@ -1252,7 +1415,11 @@ STRICT EDIT SCOPE:
 
 {sleeve_exclusion_block}
 
+{placement_guide_block}
+
 {overlap_avoidance_block}
+
+{foreground_occlusion_block}
 
 {technique_lock_block}
 
@@ -1292,15 +1459,27 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     if kind == "text":
         text = (inputs.source_text or "").strip()
         color_hint = f" Use EXACTLY this text color: {(inputs.source_color or '').strip()}." if (inputs.source_color or "").strip() else ""
+        scripts = _detect_text_scripts(text)
         compact = "".join(ch for ch in text if not ch.isspace())
         char_hint = ""
         if compact and len(compact) <= 12:
             quoted_chars = ", ".join(f'"{ch}"' for ch in compact)
             char_hint = f" Exact character order: {quoted_chars}. Do not omit or replace any character."
+        script_hint = ""
+        if scripts == {"latin"}:
+            script_hint = " Use LATIN letters only; never substitute Cyrillic lookalikes."
+        elif scripts == {"cyrillic"}:
+            script_hint = " Use CYRILLIC letters only; never substitute Latin lookalikes."
+        elif scripts == {"latin", "cyrillic"}:
+            script_hint = " Preserve the exact mixed Latin/Cyrillic sequence; do not normalize or transliterate it."
         layout_hint = ""
         if placement_key in {"right_sleeve", "wearer_right_sleeve", "left_sleeve", "wearer_left_sleeve"}:
             layout_hint = " Render it as one small upright horizontal wordmark across the upper sleeve. If it does not fit, reduce size instead of rotating it. Do not stack letters vertically."
-        fidelity = f"Text must be EXACTLY: {text!r}. Keep it readable (no distorted letters).{color_hint}{char_hint}{layout_hint}"
+        fidelity = (
+            f"Text must be EXACTLY: {text!r}. Treat image 2 as the exact wordmark artwork and copy it rather than re-typing it. "
+            f"Keep it readable (no distorted letters). Do not change alphabet/script or substitute Cyrillic/Latin lookalikes."
+            f"{color_hint}{char_hint}{script_hint}{layout_hint}"
+        )
     else:
         layout_hint = ""
         if placement_key in {"right_sleeve", "wearer_right_sleeve", "left_sleeve", "wearer_left_sleeve"}:
@@ -1332,13 +1511,15 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     sleeve_lock = _build_compact_sleeve_lock(placement_key)
     product_scope = _build_compact_product_scope_hint(inputs.product_title)
     overlap_hint = _build_compact_overlap_avoidance_hint(inputs.product_title, placement_key)
+    occlusion_hint = _build_compact_foreground_occlusion_hint(inputs.product_title, placement_key)
+    guide_hint = _build_compact_placement_guide_hint(inputs.has_placement_guide, placement_key)
     return (
-        f"Use image 1 as the base product. Use image 2 as the design source.\n"
+        f"Use image 1 as the base product. Use image 2 as the design source.{(' Use image 3 as a placement guide only.' if inputs.has_placement_guide else '')}\n"
         f"TASK: Apply the design as {application} {placement} on the product in image 1 ({inputs.product_title!r}).\n"
         f"{(technique_hint + chr(10)) if technique_hint else ''}"
         f"{fidelity}\n"
         "EDIT SCOPE: change only what is needed for the application; do not change product color, material, seams, or silhouette.\n"
         "No duplicate placements; do not add extra logos/text.\n"
-        f"{scene}{product_scope}{framing_hint}{viewpoint}{sleeve_lock}{overlap_hint}\n"
+        f"{scene}{product_scope}{framing_hint}{viewpoint}{sleeve_lock}{overlap_hint}{occlusion_hint}{guide_hint}\n"
         f"Output aspect ratio: {aspect_ratio}."
     ).strip()
