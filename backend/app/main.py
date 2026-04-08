@@ -165,12 +165,18 @@ async def _build_placement_guide_url(
     product_image_url: str,
     product_title: str,
     placement: str,
+    source_kind: str,
 ) -> str:
     if (placement or "").strip() != "chest":
         return ""
 
     img = await _load_image_from_source(product_image_url, server_base=_server_base_url(request))
-    guide = build_product_placement_guide(img, product_title=product_title, placement=placement)
+    guide = build_product_placement_guide(
+        img,
+        product_title=product_title,
+        placement=placement,
+        source_kind=source_kind,
+    )
     if guide is None:
         return ""
 
@@ -187,6 +193,10 @@ async def _build_placement_guide_url(
         ).encode("utf-8")
     ).hexdigest()[:20]
     return _save_generated_png(request, guide, prefix="placement_guide", signature=signature)
+
+
+def _is_fast_speed_mode(raw_speed_mode: str) -> bool:
+    return (raw_speed_mode or "").strip().lower() in {"fast", "speed", "turbo"}
 
 
 @dataclass(frozen=True)
@@ -789,6 +799,7 @@ def _wan_product_boxes_for_product(
     *,
     product_title: str,
     placement: str,
+    source_kind: str,
     image_size: tuple[int, int],
 ) -> list[list[int]]:
     if (placement or "").strip() != "chest":
@@ -799,7 +810,7 @@ def _wan_product_boxes_for_product(
         return []
 
     boxes: list[list[int]] = []
-    for left, top, right, bottom in safe_print_box_ratios(product_title, placement):
+    for left, top, right, bottom in safe_print_box_ratios(product_title, placement, source_kind):
         boxes.append(_bbox_from_ratios(width, height, left=left, top=top, right=right, bottom=bottom))
     return boxes
 
@@ -1159,6 +1170,7 @@ async def generate(
     scene_mode = (payload.get("scene_mode") or payload.get("sceneMode") or "on_model").strip()
     model_gender = (payload.get("model_gender") or payload.get("modelGender") or "neutral").strip()
     speed_mode = (payload.get("speed_mode") or payload.get("speedMode") or "quality").strip()
+    is_fast_mode = _is_fast_speed_mode(speed_mode)
     resolution = _resolve_resolution((payload.get("resolution") or "").strip(), speed_mode)
     kie_provider = _coerce_provider(payload)
     kie_model = (payload.get("model") or payload.get("kieModel") or payload.get("kie_model") or "").strip()
@@ -1168,6 +1180,8 @@ async def generate(
         # Be permissive: clients may have cached older defaults.
         # Force to the supported default instead of failing the request.
         kie_model = "wan/2-7-image-pro"
+    if is_fast_mode and kie_provider == "kie_jobs" and kie_model == "wan/2-7-image-pro":
+        kie_model = "wan/2-7-image"
 
     # gpt4o-image has a restricted set of sizes; align prompt + request size.
     prompt_aspect_ratio = image_size
@@ -1196,17 +1210,6 @@ async def generate(
     product_kie_url_hint = (
         (payload.get("productKieUrl") or payload.get("product_kie_url") or "").strip()
     )
-    placement_guide_url = ""
-    if scene_mode.strip().lower() == "product_only":
-        try:
-            placement_guide_url = await _build_placement_guide_url(
-                request,
-                product_image_url=product_image_url,
-                product_title=_product_prompt_title(product),
-                placement=placement,
-            )
-        except Exception:
-            placement_guide_url = ""
 
     logo_url = (payload.get("logoUrl") or "").strip()
     logo_kie_url_hint = (payload.get("logoKieUrl") or payload.get("logo_kie_url") or "").strip()
@@ -1222,6 +1225,19 @@ async def generate(
         raise HTTPException(status_code=400, detail="logoUrl or text is required")
 
     source_kind = "logo" if logo_url else "text"
+    prompt_product_title = _product_prompt_title(product)
+    placement_guide_url = ""
+    if scene_mode.strip().lower() == "product_only" and not is_fast_mode:
+        try:
+            placement_guide_url = await _build_placement_guide_url(
+                request,
+                product_image_url=product_image_url,
+                product_title=prompt_product_title,
+                placement=placement,
+                source_kind=source_kind,
+            )
+        except Exception:
+            placement_guide_url = ""
     if not logo_url and text_value:
         render_kwargs: Dict[str, Any] = {
             "fill_color": text_color,
@@ -1252,7 +1268,7 @@ async def generate(
         logo_url = optimize_logo_reference(request, logo_url, color_hex=logo_color)
 
     prompt_inputs = PromptInputs(
-        product_title=_product_prompt_title(product),
+        product_title=prompt_product_title,
         application=application,
         placement=placement,
         aspect_ratio=prompt_aspect_ratio,
@@ -1355,6 +1371,7 @@ async def generate(
             product_boxes = _wan_product_boxes_for_product(
                 product_title=str(submit_payload.get("productTitle") or ""),
                 placement=str(submit_payload.get("placement") or ""),
+                source_kind=str(submit_payload.get("sourceKind") or ""),
                 image_size=(540, 720),
             )
             bbox_list: list[list[list[int]]] = [[] for _ in range(len(input_urls))]
@@ -1466,6 +1483,7 @@ async def generate(
         "logoUrl": logo_url,
         "placementGuideUrl": placement_guide_url,
         "placement": placement,
+        "sourceKind": source_kind,
         "callBackUrl": call_back_url,
         "image_size": "3:4",
         "resolution": "720p",

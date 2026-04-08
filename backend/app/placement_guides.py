@@ -2,15 +2,21 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw, ImageOps
 
-from .prompts import has_center_front_obstacles
+from .prompts import has_center_front_obstacles, prefers_center_chest_logo
 
 
-def safe_print_box_ratios(product_title: str, placement: str) -> list[tuple[float, float, float, float]]:
+def safe_print_box_ratios(
+    product_title: str,
+    placement: str,
+    source_kind: str = "",
+) -> list[tuple[float, float, float, float]]:
     key = (placement or "").strip().lower()
     if key != "chest":
         return []
 
     title = (product_title or "").strip().lower()
+    if prefers_center_chest_logo(product_title, source_kind):
+        return [(0.40, 0.22, 0.60, 0.36)]
     if has_center_front_obstacles(product_title):
         return [(0.69, 0.22, 0.85, 0.36)]
     if "hoodie" in title or "sweatshirt" in title:
@@ -39,8 +45,9 @@ def build_product_placement_guide(
     *,
     product_title: str,
     placement: str,
+    source_kind: str = "",
 ) -> Image.Image | None:
-    safe_boxes = safe_print_box_ratios(product_title, placement)
+    safe_boxes = safe_print_box_ratios(product_title, placement, source_kind)
     if not safe_boxes:
         return None
 

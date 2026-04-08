@@ -181,7 +181,6 @@ def _is_headwear_product(product_title: str) -> bool:
 def has_center_front_obstacles(product_title: str) -> bool:
     hay = (product_title or "").strip().lower()
     markers = (
-        "hoodie",
         "zip hoodie",
         "jacket",
         "raincoat",
@@ -190,7 +189,6 @@ def has_center_front_obstacles(product_title: str) -> bool:
         "anorak",
         "parka",
         "cardigan",
-        "худи",
         "толстовк",
         "куртк",
         "ветров",
@@ -202,7 +200,14 @@ def has_center_front_obstacles(product_title: str) -> bool:
     )
     return any(marker in hay for marker in markers)
 
-def _placement_hint_for_product(product_title: str, placement_key: str) -> str:
+def prefers_center_chest_logo(product_title: str, source_kind: str) -> bool:
+    return (
+        (source_kind or "").strip().lower() == "logo"
+        and not has_center_front_obstacles(product_title)
+    )
+
+
+def _placement_hint_for_product(product_title: str, placement_key: str, source_kind: str = "") -> str:
     key = (placement_key or "").strip()
     base = PLACEMENT_HINTS.get(key, key)
 
@@ -217,6 +222,8 @@ def _placement_hint_for_product(product_title: str, placement_key: str) -> str:
             return "on the RIGHT SIDE panel of the cap, centered"
         if key == "top":
             return "on the TOP crown area of the cap, centered"
+    if key == "chest" and prefers_center_chest_logo(product_title, source_kind):
+        return "centered on the upper-middle chest"
     if key == "chest" and has_center_front_obstacles(product_title):
         return (
             "on one clean upper chest panel, slightly off-center, fully away from the center line, "
@@ -1221,7 +1228,7 @@ def _build_compact_viewpoint_hint(placement_key: str) -> str:
 
 def build_nanobanana_prompt(inputs: PromptInputs) -> str:
     placement_key = _canonicalize_placement(inputs.placement)
-    placement = _placement_hint_for_product(inputs.product_title, placement_key)
+    placement = _placement_hint_for_product(inputs.product_title, placement_key, inputs.source_kind)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
     technique_lock_block = _build_technique_lock_block(inputs.application)
     is_sleeve = placement_key in {"wearer_right_sleeve", "wearer_left_sleeve"}
@@ -1450,7 +1457,7 @@ def build_gpt_image_prompt(inputs: PromptInputs) -> str:
     Compact prompt optimized for GPT Image 1.5 endpoints (strict prompt length limits).
     """
     placement_key = _canonicalize_placement(inputs.placement)
-    placement = _placement_hint_for_product(inputs.product_title, placement_key)
+    placement = _placement_hint_for_product(inputs.product_title, placement_key, inputs.source_kind)
     application = APPLICATION_HINTS.get(inputs.application, inputs.application)
     technique_hint = _build_compact_technique_hint(inputs.application)
 
