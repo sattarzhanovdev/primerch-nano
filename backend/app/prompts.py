@@ -200,6 +200,17 @@ def has_center_front_obstacles(product_title: str) -> bool:
     )
     return any(marker in hay for marker in markers)
 
+
+def has_hanging_drawstrings(product_title: str) -> bool:
+    hay = (product_title or "").strip().lower()
+    markers = (
+        "hoodie",
+        "zip hoodie",
+        "худи",
+        "толстовк",
+    )
+    return any(marker in hay for marker in markers)
+
 def prefers_center_chest_logo(product_title: str, source_kind: str) -> bool:
     return (
         (source_kind or "").strip().lower() == "logo"
@@ -222,13 +233,15 @@ def _placement_hint_for_product(product_title: str, placement_key: str, source_k
             return "on the RIGHT SIDE panel of the cap, centered"
         if key == "top":
             return "on the TOP crown area of the cap, centered"
-    if key == "chest" and prefers_center_chest_logo(product_title, source_kind):
-        return "centered on the upper-middle chest"
     if key == "chest" and has_center_front_obstacles(product_title):
         return (
             "on one clean upper chest panel, slightly off-center, fully away from the center line, "
             "zipper/placket, hood opening, and hanging drawstrings"
         )
+    if key == "chest" and has_hanging_drawstrings(product_title):
+        return "centered on the middle chest, BELOW the hanging drawstrings and below the hood opening"
+    if key == "chest" and prefers_center_chest_logo(product_title, source_kind):
+        return "centered on the upper-middle chest"
     return base
 
 def _build_product_scope_lock(product_title: str) -> str:
@@ -271,6 +284,11 @@ def _build_overlap_avoidance_block(product_title: str, placement_key: str) -> st
                 "- If the product has a center zipper/placket or hanging hood drawstrings, place the design fully on ONE upper chest panel to the side of those details.",
                 "- Never center the design between the drawstrings or across the front closure line.",
             ])
+        elif key == "chest" and has_hanging_drawstrings(product_title):
+            lines.extend([
+                "- For hoodies with hanging drawstrings, keep the design centered but LOWER on the chest, below the drawstring endpoints and below the hood opening.",
+                "- Never let the design intersect the drawstrings or sit in the narrow corridor between them.",
+            ])
     elif key in {"right_sleeve", "left_sleeve", "wearer_right_sleeve", "wearer_left_sleeve"}:
         lines.extend([
             "- Keep the design fully inside the sleeve panel and away from the shoulder seam, armhole seam, cuff, and any panel boundary.",
@@ -306,6 +324,11 @@ def _build_compact_overlap_avoidance_hint(product_title: str, placement_key: str
         return (
             hint
             + " If the garment has a zipper/placket or hanging drawstrings, keep the design on a single upper chest panel beside them, never across the center line."
+        )
+    if key == "chest" and has_hanging_drawstrings(product_title):
+        return (
+            hint
+            + " For drawstring hoodies, keep the design centered but lower on the chest, below the hanging drawstrings; never let the design intersect them."
         )
     return hint
 

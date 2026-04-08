@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw, ImageOps
 
-from .prompts import has_center_front_obstacles, prefers_center_chest_logo
+from .prompts import has_center_front_obstacles, has_hanging_drawstrings, prefers_center_chest_logo
 
 
 def safe_print_box_ratios(
@@ -15,10 +15,12 @@ def safe_print_box_ratios(
         return []
 
     title = (product_title or "").strip().lower()
-    if prefers_center_chest_logo(product_title, source_kind):
-        return [(0.40, 0.22, 0.60, 0.36)]
     if has_center_front_obstacles(product_title):
         return [(0.69, 0.22, 0.85, 0.36)]
+    if has_hanging_drawstrings(product_title):
+        return [(0.36, 0.33, 0.64, 0.45)]
+    if prefers_center_chest_logo(product_title, source_kind):
+        return [(0.40, 0.22, 0.60, 0.36)]
     if "hoodie" in title or "sweatshirt" in title:
         return [(0.64, 0.23, 0.83, 0.37)]
     return [(0.60, 0.24, 0.81, 0.38)]
@@ -29,15 +31,17 @@ def forbidden_zone_ratios(product_title: str, placement: str) -> list[tuple[floa
     if key != "chest":
         return []
 
-    if not has_center_front_obstacles(product_title):
+    if not has_hanging_drawstrings(product_title):
         return []
 
-    return [
-        (0.47, 0.14, 0.54, 0.95),  # zipper / placket line
+    zones = [
         (0.29, 0.13, 0.40, 0.48),  # left drawstring corridor
         (0.54, 0.13, 0.69, 0.48),  # right drawstring corridor
         (0.42, 0.10, 0.60, 0.22),  # hood opening / neck hardware area
     ]
+    if has_center_front_obstacles(product_title):
+        zones.insert(0, (0.47, 0.14, 0.54, 0.95))  # zipper / placket line
+    return zones
 
 
 def build_product_placement_guide(
